@@ -11,6 +11,7 @@ import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:http/http.dart' as http;
 import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
+import 'package:file_picker/file_picker.dart';
 import '../utils/js_bridge.dart';
 
 // Notification plugin instance — initialized once in initState
@@ -37,6 +38,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
   static const Color textSecondary = Color(0xFF9CA3AF);
 
   String _searchQuery = '';
+  String _pairsSearchQuery = '';
+  final _pairsSearchCtrl = TextEditingController();
   String _selectedPlatformFilter =
       'all'; // 'all', 'Quotex', 'Pocket Option', 'Expert Option'
   String _selectedRoleFilter = 'all'; // 'all', 'vip', 'standard'
@@ -86,93 +89,233 @@ class _AdminDashboardState extends State<AdminDashboard> {
   final _maintMsgCtrl   = TextEditingController(text: 'التطبيق متوقف مؤقتاً للصيانة، سنعود قريباً');
   final _maintHoursCtrl = TextEditingController(text: '2');
 
-  // ── Pairs management (TradingView pairs only — OTC is auto-detected by scraper)
+  // ── Pairs management
+  bool _otcSyncing = false;
+
+  static String _autoCategory(String chartSym) {
+    if (chartSym.toUpperCase().endsWith('_OTC')) return 'otc';
+    return 'forex';
+  }
+
+  Widget _pairDialogContent({
+    required TextEditingController symCtrl,
+    required TextEditingController chartSymCtrl,
+  }) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _pairField(symCtrl, 'اسم العرض (للمستخدم)', 'EUR/USD', Icons.label_rounded),
+        const SizedBox(height: 10),
+        _pairField(chartSymCtrl, 'رمز الزوج', 'EURUSD  أو  EURUSD_OTC', Icons.show_chart_rounded),
+      ],
+    );
+  }
+
+  Future<void> _syncOtcFromScraper() async {
+    if (_otcSyncing) return;
+    setState(() => _otcSyncing = true);
+    try {
+      final res = await http
+          .get(Uri.parse('https://euro-trade-proxy.onrender.com/api/otc/pairs?broker=Pocket%20Option'))
+          .timeout(const Duration(seconds: 15));
+      if (res.statusCode != 200) throw Exception('Proxy returned ${res.statusCode}');
+      final body   = jsonDecode(res.body) as Map<String, dynamic>;
+      final rawSyms = (body['pairs'] as List<dynamic>? ?? []).cast<String>();
+      if (rawSyms.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('السكرابر لم يجمع أزواج OTC بعد — انتظر قليلاً وحاول مرة أخرى',
+                style: GoogleFonts.outfit()),
+            backgroundColor: warningOrange,
+          ));
+        }
+        return;
+      }
+      // Fetch existing pairs to avoid duplicates
+      final existing = await FirebaseFirestore.instance.collection('pairs').get();
+      final existingSyms = existing.docs
+          .map((d) => (d.data()['chartSymbol'] as String? ?? '').toUpperCase())
+          .toSet();
+      int added = 0;
+      final batch = FirebaseFirestore.instance.batch();
+      for (final sym in rawSyms) {
+        final upper = sym.toUpperCase();
+        if (existingSyms.contains(upper)) continue;
+        final display = _otcSymToDisplay(upper);
+        final ref = FirebaseFirestore.instance.collection('pairs').doc();
+        batch.set(ref, {
+          'symbol':      display,
+          'chartSymbol': upper,
+          'category':    'otc',
+          'type':        'OTC',
+          'order':       DateTime.now().millisecondsSinceEpoch + added,
+        });
+        added++;
+      }
+      if (added > 0) await batch.commit();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(
+            added > 0 ? 'تمت إضافة $added زوج OTC من السكرابر' : 'كل الأزواج موجودة بالفعل (${rawSyms.length} زوج)',
+            style: GoogleFonts.outfit(),
+          ),
+          backgroundColor: callGreen,
+        ));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('خطأ: $e', style: GoogleFonts.outfit()),
+          backgroundColor: putRed,
+        ));
+      }
+    } finally {
+      if (mounted) setState(() => _otcSyncing = false);
+    }
+  }
+
+  static String _otcSymToDisplay(String sym) {
+    final base = sym.replaceAll('_OTC', '').toUpperCase();
+    if (base.length >= 6) return '${base.substring(0, 3)}/${base.substring(3)} OTC';
+    return sym;
+  }
+
   void _showAddPairDialog() {
     final symCtrl      = TextEditingController();
     final chartSymCtrl = TextEditingController();
-    final labelCtrl    = TextEditingController();
-    String selCategory = 'forex';
-
-    const categories = ['forex', 'metals', 'commodities', 'crypto'];
-    const catLabels  = {'forex': 'فوركس', 'metals': 'معادن', 'commodities': 'سلع', 'crypto': 'كريبتو'};
 
     showDialog(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, dlgSet) => AlertDialog(
-          backgroundColor: cardBgColor,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: Text('إضافة زوج (TradingView)',
-              style: GoogleFonts.outfit(color: textPrimary, fontWeight: FontWeight.bold)),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _pairField(symCtrl, 'اسم الزوج (للعرض)', 'EUR/USD', Icons.label_rounded),
-                const SizedBox(height: 10),
-                _pairField(chartSymCtrl, 'رمز الشارت', 'EURUSD', Icons.show_chart_rounded),
-                const SizedBox(height: 6),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                  child: Text(
-                    '✅ بدون exchange: EURUSD / XAUUSD (OANDA تلقائياً)\n'
-                    '✅ بـ exchange: OANDA:XAUUSD / TVC:GOLD / FXCM:EURUSD',
-                    style: GoogleFonts.outfit(fontSize: 10, color: callGreen, height: 1.5),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                _pairField(labelCtrl, 'تصنيف فرعي (اختياري)', 'OANDA / futures', Icons.tag_rounded),
-                const SizedBox(height: 14),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  decoration: BoxDecoration(
-                    color: spaceBackground,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: borderGlow),
-                  ),
-                  child: DropdownButtonHideUnderline(
-                    child: DropdownButton<String>(
-                      value: selCategory,
-                      isExpanded: true,
-                      dropdownColor: cardBgColor,
-                      style: GoogleFonts.outfit(color: textPrimary, fontSize: 13),
-                      items: categories.map((c) => DropdownMenuItem(
-                        value: c, child: Text(catLabels[c]!),
-                      )).toList(),
-                      onChanged: (v) { if (v != null) dlgSet(() => selCategory = v); },
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: Text('إلغاء', style: GoogleFonts.outfit(color: textSecondary)),
-            ),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: accentCyan, foregroundColor: spaceBackground),
-              onPressed: () {
-                final sym      = symCtrl.text.trim();
-                final chartSym = chartSymCtrl.text.trim().toUpperCase();
-                if (sym.isEmpty || chartSym.isEmpty) return;
-                FirebaseFirestore.instance.collection('pairs').add({
-                  'symbol':      sym,
-                  'chartSymbol': chartSym,
-                  'category':    selCategory,
-                  'type':        selCategory,
-                  'label':       labelCtrl.text.trim(),
-                  'order':       DateTime.now().millisecondsSinceEpoch,
-                });
-                Navigator.pop(ctx);
-              },
-              child: Text('إضافة', style: GoogleFonts.outfit(fontWeight: FontWeight.bold)),
-            ),
-          ],
+      builder: (ctx) => AlertDialog(
+        backgroundColor: cardBgColor,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text('إضافة زوج للتداول',
+            style: GoogleFonts.outfit(color: textPrimary, fontWeight: FontWeight.bold)),
+        content: SingleChildScrollView(
+          child: _pairDialogContent(symCtrl: symCtrl, chartSymCtrl: chartSymCtrl),
         ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text('إلغاء', style: GoogleFonts.outfit(color: textSecondary)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: accentCyan, foregroundColor: spaceBackground),
+            onPressed: () {
+              final sym      = symCtrl.text.trim();
+              final chartSym = chartSymCtrl.text.trim().toUpperCase();
+              if (sym.isEmpty || chartSym.isEmpty) return;
+              final cat = _autoCategory(chartSym);
+              FirebaseFirestore.instance.collection('pairs').add({
+                'symbol':      sym,
+                'chartSymbol': chartSym,
+                'category':    cat,
+                'type':        cat == 'otc' ? 'OTC' : cat,
+                'order':       DateTime.now().millisecondsSinceEpoch,
+              });
+              Navigator.pop(ctx);
+            },
+            child: Text('إضافة', style: GoogleFonts.outfit(fontWeight: FontWeight.bold)),
+          ),
+        ],
       ),
     );
+  }
+
+  void _showEditPairDialog(Map<String, dynamic> pair) {
+    final symCtrl      = TextEditingController(text: pair['symbol'] as String? ?? '');
+    final chartSymCtrl = TextEditingController(text: pair['chartSymbol'] as String? ?? '');
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: cardBgColor,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text('تعديل الزوج',
+            style: GoogleFonts.outfit(color: textPrimary, fontWeight: FontWeight.bold)),
+        content: SingleChildScrollView(
+          child: _pairDialogContent(symCtrl: symCtrl, chartSymCtrl: chartSymCtrl),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text('إلغاء', style: GoogleFonts.outfit(color: textSecondary)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: accentCyan, foregroundColor: spaceBackground),
+            onPressed: () {
+              final sym      = symCtrl.text.trim();
+              final chartSym = chartSymCtrl.text.trim().toUpperCase();
+              if (sym.isEmpty || chartSym.isEmpty) return;
+              final cat = _autoCategory(chartSym);
+              FirebaseFirestore.instance.collection('pairs').doc(pair['id'] as String).update({
+                'symbol':      sym,
+                'chartSymbol': chartSym,
+                'category':    cat,
+                'type':        cat == 'otc' ? 'OTC' : cat,
+              });
+              Navigator.pop(ctx);
+            },
+            child: Text('حفظ', style: GoogleFonts.outfit(fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _importPairsFromCSV() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['csv'],
+      withData: true,
+    );
+    if (result == null || result.files.isEmpty) return;
+    final bytes = result.files.first.bytes;
+    if (bytes == null) return;
+
+    final content = utf8.decode(bytes);
+    final lines   = content.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).toList();
+    if (lines.isEmpty) return;
+
+    // Skip header row if present
+    final dataLines = lines.first.toLowerCase().startsWith('symbol') ? lines.skip(1).toList() : lines;
+
+    int added = 0;
+    final batch = FirebaseFirestore.instance.batch();
+    // CSV format: symbol, chartSymbol, category
+    for (final line in dataLines) {
+      final cols = line.split(',').map((c) => c.trim().replaceAll('"', '')).toList();
+      if (cols.length < 3) continue;
+      final sym      = cols[0];
+      final chartSym = cols[1].toUpperCase();
+      if (sym.isEmpty || chartSym.isEmpty) continue;
+      final cat = _autoCategory(chartSym);
+      final ref = FirebaseFirestore.instance.collection('pairs').doc();
+      batch.set(ref, {
+        'symbol':      sym,
+        'chartSymbol': chartSym,
+        'category':    cat,
+        'type':        cat == 'otc' ? 'OTC' : cat,
+        'order':       DateTime.now().millisecondsSinceEpoch + added,
+      });
+      added++;
+    }
+    if (added == 0) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('لم يتم العثور على بيانات صحيحة في الملف', style: GoogleFonts.outfit()),
+        ));
+      }
+      return;
+    }
+    await batch.commit();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('تم استيراد $added زوج بنجاح', style: GoogleFonts.outfit()),
+        backgroundColor: callGreen,
+      ));
+    }
   }
 
   Widget _pairField(TextEditingController ctrl, String label, String hint, IconData icon) {
@@ -202,9 +345,18 @@ class _AdminDashboardState extends State<AdminDashboard> {
     return StreamBuilder<QuerySnapshot>(
       stream: FirebaseFirestore.instance.collection('pairs').orderBy('order').snapshots(),
       builder: (context, snap) {
-        final pairs = snap.hasData
+        final allPairs = snap.hasData
             ? snap.data!.docs.map((d) => {'id': d.id, ...d.data() as Map<String, dynamic>}).toList()
             : <Map<String, dynamic>>[];
+
+        final q = _pairsSearchQuery.toLowerCase();
+        final pairs = q.isEmpty
+            ? allPairs
+            : allPairs.where((p) {
+                final sym      = (p['symbol'] as String? ?? '').toLowerCase();
+                final chartSym = (p['chartSymbol'] as String? ?? '').toLowerCase();
+                return sym.contains(q) || chartSym.contains(q);
+              }).toList();
 
         return Container(
           decoration: BoxDecoration(
@@ -215,8 +367,9 @@ class _AdminDashboardState extends State<AdminDashboard> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              // Header
               Padding(
-                padding: const EdgeInsets.fromLTRB(16, 14, 12, 14),
+                padding: const EdgeInsets.fromLTRB(16, 14, 8, 14),
                 child: Row(
                   children: [
                     Container(
@@ -234,11 +387,30 @@ class _AdminDashboardState extends State<AdminDashboard> {
                         children: [
                           Text('أزواج التداول',
                               style: GoogleFonts.outfit(color: textPrimary, fontWeight: FontWeight.bold, fontSize: 14)),
-                          Text('${pairs.length} زوج',
+                          Text('${allPairs.length} زوج',
                               style: GoogleFonts.outfit(color: textSecondary, fontSize: 11)),
                         ],
                       ),
                     ),
+                    IconButton(
+                      tooltip: 'استيراد من CSV',
+                      icon: Icon(Icons.upload_file_rounded, color: textSecondary, size: 20),
+                      onPressed: _importPairsFromCSV,
+                    ),
+                    const SizedBox(width: 6),
+                    ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: callGreen, foregroundColor: spaceBackground,
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                      icon: _otcSyncing
+                          ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                          : const Icon(Icons.sync_rounded, size: 16),
+                      label: Text('Sync OTC', style: GoogleFonts.outfit(fontSize: 12, fontWeight: FontWeight.bold)),
+                      onPressed: _otcSyncing ? null : _syncOtcFromScraper,
+                    ),
+                    const SizedBox(width: 6),
                     ElevatedButton.icon(
                       style: ElevatedButton.styleFrom(
                         backgroundColor: accentCyan, foregroundColor: spaceBackground,
@@ -252,59 +424,99 @@ class _AdminDashboardState extends State<AdminDashboard> {
                   ],
                 ),
               ),
-              if (pairs.isEmpty)
+              const Divider(height: 1, color: Color(0xFF1F2937)),
+              // Search box
+              if (allPairs.isNotEmpty)
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+                  child: TextField(
+                    controller: _pairsSearchCtrl,
+                    style: GoogleFonts.outfit(color: textPrimary, fontSize: 13),
+                    decoration: InputDecoration(
+                      hintText: 'ابحث عن زوج...',
+                      hintStyle: GoogleFonts.outfit(color: textSecondary, fontSize: 12),
+                      prefixIcon: Icon(Icons.search_rounded, color: textSecondary, size: 18),
+                      suffixIcon: _pairsSearchQuery.isNotEmpty
+                          ? IconButton(
+                              icon: Icon(Icons.close_rounded, color: textSecondary, size: 16),
+                              onPressed: () => setState(() { _pairsSearchCtrl.clear(); _pairsSearchQuery = ''; }),
+                            )
+                          : null,
+                      filled: true, fillColor: spaceBackground,
+                      border:        OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: borderGlow)),
+                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: borderGlow)),
+                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: accentCyan)),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      isDense: true,
+                    ),
+                    onChanged: (v) => setState(() => _pairsSearchQuery = v),
+                  ),
+                ),
+              // Pairs list
+              if (allPairs.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
                   child: Text('لا توجد أزواج بعد — اضغط إضافة زوج للبدء',
                       style: GoogleFonts.outfit(color: textSecondary, fontSize: 12)),
                 )
-              else ...[
-                const Divider(height: 1, color: Color(0xFF1F2937)),
-                ...['forex', 'otc', 'metals', 'commodities', 'crypto'].expand((cat) {
-                  final catPairs = pairs.where((p) => p['category'] == cat).toList();
-                  if (catPairs.isEmpty) return <Widget>[];
-                  return [
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
-                      child: Text(catLabels[cat] ?? cat,
-                          style: GoogleFonts.outfit(color: textSecondary, fontSize: 11, fontWeight: FontWeight.w600)),
-                    ),
-                    ...catPairs.map((pair) => ListTile(
-                      dense: true,
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
-                      title: Row(
+              else if (pairs.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+                  child: Text('لا توجد نتائج لـ "$_pairsSearchQuery"',
+                      style: GoogleFonts.outfit(color: textSecondary, fontSize: 12)),
+                )
+              else
+                SizedBox(
+                  height: 420,
+                  child: Scrollbar(
+                    thumbVisibility: true,
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          Text(pair['symbol'] as String? ?? '',
-                              style: GoogleFonts.outfit(color: textPrimary, fontSize: 13, fontWeight: FontWeight.w600)),
-                          if ((pair['label'] as String? ?? '').isNotEmpty) ...[
-                            const SizedBox(width: 6),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: accentBlue.withAlpha(30),
-                                borderRadius: BorderRadius.circular(4),
-                                border: Border.all(color: accentBlue.withAlpha(80)),
+                          ...['forex', 'otc', 'metals', 'commodities', 'crypto'].expand((cat) {
+                            final catPairs = pairs.where((p) => p['category'] == cat).toList();
+                            if (catPairs.isEmpty) return <Widget>[];
+                            return [
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                                child: Text(catLabels[cat] ?? cat,
+                                    style: GoogleFonts.outfit(color: textSecondary, fontSize: 11, fontWeight: FontWeight.w600)),
                               ),
-                              child: Text(pair['label'] as String,
-                                  style: GoogleFonts.outfit(color: accentBlue, fontSize: 9, fontWeight: FontWeight.w600)),
-                            ),
-                          ],
+                              ...catPairs.map((pair) => ListTile(
+                                dense: true,
+                                contentPadding: const EdgeInsets.fromLTRB(16, 0, 4, 0),
+                                title: Text(pair['symbol'] as String? ?? '',
+                                    style: GoogleFonts.outfit(color: textPrimary, fontSize: 13, fontWeight: FontWeight.w600)),
+                                subtitle: Text(pair['chartSymbol'] as String? ?? '',
+                                    style: GoogleFonts.outfit(color: textSecondary, fontSize: 10)),
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(
+                                      icon: Icon(Icons.edit_rounded, color: accentCyan, size: 16),
+                                      tooltip: 'تعديل',
+                                      onPressed: () => _showEditPairDialog(pair),
+                                    ),
+                                    IconButton(
+                                      icon: Icon(Icons.delete_outline_rounded, color: putRed, size: 16),
+                                      tooltip: 'حذف',
+                                      onPressed: () => FirebaseFirestore.instance
+                                          .collection('pairs')
+                                          .doc(pair['id'] as String)
+                                          .delete(),
+                                    ),
+                                  ],
+                                ),
+                              )),
+                            ];
+                          }),
+                          const SizedBox(height: 8),
                         ],
                       ),
-                      subtitle: Text(pair['chartSymbol'] as String? ?? '',
-                          style: GoogleFonts.outfit(color: textSecondary, fontSize: 10)),
-                      trailing: IconButton(
-                        icon: Icon(Icons.delete_outline_rounded, color: putRed, size: 18),
-                        onPressed: () => FirebaseFirestore.instance
-                            .collection('pairs')
-                            .doc(pair['id'] as String)
-                            .delete(),
-                      ),
-                    )),
-                  ];
-                }),
-                const SizedBox(height: 8),
-              ],
+                    ),
+                  ),
+                ),
             ],
           ),
         );
@@ -686,6 +898,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
     _updVersionCtrl.dispose(); _updFeaturesCtrl.dispose(); _updLinkCtrl.dispose();
     _maintMsgCtrl.dispose(); _maintHoursCtrl.dispose();
     _stdStrategyCtrl.dispose(); _vipStrategyCtrl.dispose();
+    _pairsSearchCtrl.dispose();
     super.dispose();
   }
 
