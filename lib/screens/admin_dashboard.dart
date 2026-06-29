@@ -79,6 +79,22 @@ class _AdminDashboardState extends State<AdminDashboard> {
   );
   final _maintHoursCtrl = TextEditingController(text: '2');
 
+  // ── Promo Announcement state (configs id 'promo') ───────────────
+  final _promoTitleCtrl = TextEditingController();
+  final _promoMessageCtrl = TextEditingController();
+  final _promoPriceCtrl = TextEditingController();
+  final _promoSaveCtrl = TextEditingController();
+  final _promoHoursCtrl = TextEditingController();
+  final _promoAutoCloseCtrl = TextEditingController(text: '10');
+  final _promoCtaCtrl = TextEditingController(text: 'تواصل معايا');
+  final _promoTargetIdCtrl = TextEditingController();
+  bool _promoEnabled = false;
+  String _promoTargetMode = 'all'; // 'all' or 'specific'
+  String? _promoStoredEndsAt; // currently stored endsAt (read-only display)
+  int _promoVersion = 1;
+  bool _promoLoaded = false;
+  bool _promoSaving = false;
+
 
   static const _pairCategories = [
     ('forex', 'فوركس', Icons.currency_exchange_rounded),
@@ -763,6 +779,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
   void initState() {
     super.initState();
     _startNewUserListener();
+    _loadPromo();
     _fetchDbSize();
     _dbSizeTimer = Timer.periodic(
       const Duration(minutes: 5),
@@ -973,6 +990,14 @@ class _AdminDashboardState extends State<AdminDashboard> {
     _updLinkCtrl.dispose();
     _maintMsgCtrl.dispose();
     _maintHoursCtrl.dispose();
+    _promoTitleCtrl.dispose();
+    _promoMessageCtrl.dispose();
+    _promoPriceCtrl.dispose();
+    _promoSaveCtrl.dispose();
+    _promoHoursCtrl.dispose();
+    _promoAutoCloseCtrl.dispose();
+    _promoCtaCtrl.dispose();
+    _promoTargetIdCtrl.dispose();
     _stdStrategyCtrl.dispose();
     _vipStrategyCtrl.dispose();
     _pairsSearchCtrl.dispose();
@@ -1420,6 +1445,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                         _buildAppUpdatesView(),
                         _buildAppControlView(),
                         _buildSiteThemeView(),
+                        _buildPromoView(),
                       ],
                     ),
                   ),
@@ -1665,6 +1691,11 @@ class _AdminDashboardState extends State<AdminDashboard> {
             'ثيم الموقع الكامل 🎨',
             Icons.palette_rounded,
           ),
+          _buildSidebarNavItem(
+            7,
+            'العرض الترويجي / الإعلان',
+            Icons.campaign_rounded,
+          ),
           const Spacer(),
           Padding(
             padding: const EdgeInsets.all(20),
@@ -1729,6 +1760,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
             _buildMobileTabItem(4, 'تحديث'),
             _buildMobileTabItem(5, 'تحكم'),
             _buildMobileTabItem(6, 'الثيم 🎨'),
+            _buildMobileTabItem(7, 'إعلان'),
           ],
         ),
       ),
@@ -5234,6 +5266,489 @@ class _AdminDashboardState extends State<AdminDashboard> {
                       }).toList(),
                     );
                   },
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Promo Announcement (configs id 'promo') ─────────────────────────────────
+  Future<void> _loadPromo() async {
+    try {
+      final row = await Supabase.instance.client
+          .from('configs')
+          .select('data')
+          .eq('id', 'promo')
+          .maybeSingle();
+      final data = (row?['data'] as Map<String, dynamic>?) ?? {};
+      _promoEnabled = data['enabled'] as bool? ?? false;
+      final target = data['target'] as String? ?? 'all';
+      if (target == 'all') {
+        _promoTargetMode = 'all';
+        _promoTargetIdCtrl.text = '';
+      } else {
+        _promoTargetMode = 'specific';
+        _promoTargetIdCtrl.text = target;
+      }
+      _promoTitleCtrl.text = data['title'] as String? ?? '';
+      _promoMessageCtrl.text = data['message'] as String? ?? '';
+      _promoPriceCtrl.text = data['price'] as String? ?? '';
+      _promoSaveCtrl.text = data['save'] as String? ?? '';
+      _promoAutoCloseCtrl.text = (data['autoCloseSeconds'] as int? ?? 10)
+          .toString();
+      _promoCtaCtrl.text = data['ctaText'] as String? ?? 'تواصل معايا';
+      _promoStoredEndsAt = data['endsAt'] as String?;
+      _promoVersion = data['version'] as int? ?? 1;
+    } catch (e) {
+      debugPrint('promo load failed: $e');
+    } finally {
+      _promoLoaded = true;
+      if (mounted) setState(() {});
+    }
+  }
+
+  Future<void> _savePromo() async {
+    if (_promoSaving) return;
+    setState(() => _promoSaving = true);
+    try {
+      // Compute endsAt from the hours field (a DURATION, not a date).
+      // Anchor to UTC at save time so the user-side countdown shrinks correctly.
+      String? endsAt;
+      final hours = int.tryParse(_promoHoursCtrl.text.trim()) ?? 0;
+      if (hours > 0) {
+        endsAt = DateTime.now()
+            .toUtc()
+            .add(Duration(hours: hours))
+            .toIso8601String();
+      }
+
+      final autoClose = int.tryParse(_promoAutoCloseCtrl.text.trim()) ?? 10;
+      final target = _promoTargetMode == 'specific'
+          ? _promoTargetIdCtrl.text.trim()
+          : 'all';
+
+      final newVersion = _promoVersion + 1;
+
+      await Supabase.instance.client.from('configs').upsert({
+        'id': 'promo',
+        'data': {
+          'enabled': _promoEnabled,
+          'target': target.isEmpty ? 'all' : target,
+          'title': _promoTitleCtrl.text.trim(),
+          'message': _promoMessageCtrl.text.trim(),
+          'price': _promoPriceCtrl.text.trim(),
+          'save': _promoSaveCtrl.text.trim(),
+          'endsAt': endsAt,
+          'autoCloseSeconds': autoClose,
+          'ctaText': _promoCtaCtrl.text.trim().isEmpty
+              ? 'تواصل معايا'
+              : _promoCtaCtrl.text.trim(),
+          'version': newVersion,
+        },
+      });
+
+      _promoVersion = newVersion;
+      _promoStoredEndsAt = endsAt;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('تم حفظ العرض الترويجي ✅'),
+            backgroundColor: callGreen,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('خطأ: $e'), backgroundColor: putRed),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _promoSaving = false);
+    }
+  }
+
+  Future<void> _stopPromo() async {
+    setState(() => _promoEnabled = false);
+    await _savePromo();
+  }
+
+  String _formatStoredEndsAt(String iso) {
+    try {
+      final dt = DateTime.parse(iso).toLocal();
+      return DateFormat('yyyy-MM-dd HH:mm').format(dt);
+    } catch (_) {
+      return iso;
+    }
+  }
+
+  Widget _buildPromoView() {
+    if (!_promoLoaded) {
+      return const Center(
+        child: CircularProgressIndicator(color: accentCyan),
+      );
+    }
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'العرض الترويجي / الإعلان',
+            style: GoogleFonts.outfit(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: textPrimary,
+            ),
+          ),
+          const SizedBox(height: 16),
+          // ── Promo analytics (impressions + link clicks) ──
+          FutureBuilder<Map<String, dynamic>?>(
+            future: Supabase.instance.client
+                .from('clicks')
+                .select('data')
+                .eq('id', 'promo')
+                .maybeSingle(),
+            builder: (ctx, snap) {
+              final data = (snap.data?['data'] as Map<String, dynamic>?) ?? {};
+              final views = data['views'] ?? 0;
+              final cta = data['cta'] ?? 0;
+              Widget stat(String label, Object value, IconData icon, Color color) {
+                return Expanded(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 10),
+                    decoration: BoxDecoration(
+                      color: cardBgColor,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: color.withAlpha(90)),
+                    ),
+                    child: Column(
+                      children: [
+                        Icon(icon, color: color, size: 22),
+                        const SizedBox(height: 6),
+                        Text('$value',
+                            style: GoogleFonts.outfit(
+                                fontSize: 20, fontWeight: FontWeight.bold, color: textPrimary)),
+                        const SizedBox(height: 2),
+                        Text(label,
+                            textAlign: TextAlign.center,
+                            style: GoogleFonts.outfit(fontSize: 11, color: textSecondary)),
+                      ],
+                    ),
+                  ),
+                );
+              }
+              return Row(
+                children: [
+                  stat('شاهدوا الإعلان', views, Icons.visibility_rounded, accentCyan),
+                  const SizedBox(width: 10),
+                  stat('ضغطوا على الرابط', cta, Icons.touch_app_rounded, const Color(0xFF229ED9)),
+                ],
+              );
+            },
+          ),
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: cardBgColor,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: accentCyan.withAlpha(80)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(
+                      Icons.campaign_rounded,
+                      color: accentCyan,
+                      size: 18,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      'إعداد الإعلان للمستخدمين',
+                      style: GoogleFonts.outfit(
+                        color: textPrimary,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'يظهر هذا الإعلان للمستخدمين عند فتح التطبيق.',
+                  style: GoogleFonts.outfit(color: textSecondary, fontSize: 10),
+                ),
+                const SizedBox(height: 14),
+
+                // Enabled switch
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: spaceBackground,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: borderGlow),
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'تفعيل العرض',
+                          style: GoogleFonts.outfit(
+                            color: textPrimary,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      Switch(
+                        value: _promoEnabled,
+                        activeColor: callGreen,
+                        onChanged: (v) => setState(() => _promoEnabled = v),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 14),
+
+                // Target selector
+                Text(
+                  'الجمهور المستهدف',
+                  style: GoogleFonts.outfit(color: textSecondary, fontSize: 12),
+                ),
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    ChoiceChip(
+                      label: Text(
+                        'الجميع',
+                        style: GoogleFonts.outfit(
+                          fontSize: 13,
+                          color: _promoTargetMode == 'all'
+                              ? spaceBackground
+                              : textPrimary,
+                        ),
+                      ),
+                      selected: _promoTargetMode == 'all',
+                      selectedColor: accentCyan,
+                      backgroundColor: spaceBackground,
+                      side: BorderSide(
+                        color: _promoTargetMode == 'all'
+                            ? accentCyan
+                            : borderGlow,
+                      ),
+                      onSelected: (_) =>
+                          setState(() => _promoTargetMode = 'all'),
+                    ),
+                    const SizedBox(width: 8),
+                    ChoiceChip(
+                      label: Text(
+                        'مستخدم محدد',
+                        style: GoogleFonts.outfit(
+                          fontSize: 13,
+                          color: _promoTargetMode == 'specific'
+                              ? spaceBackground
+                              : textPrimary,
+                        ),
+                      ),
+                      selected: _promoTargetMode == 'specific',
+                      selectedColor: accentCyan,
+                      backgroundColor: spaceBackground,
+                      side: BorderSide(
+                        color: _promoTargetMode == 'specific'
+                            ? accentCyan
+                            : borderGlow,
+                      ),
+                      onSelected: (_) =>
+                          setState(() => _promoTargetMode = 'specific'),
+                    ),
+                  ],
+                ),
+                if (_promoTargetMode == 'specific') ...[
+                  const SizedBox(height: 8),
+                  _inputField(
+                    controller: _promoTargetIdCtrl,
+                    hint: 'معرف حساب المستخدم (account id)',
+                  ),
+                ],
+                const SizedBox(height: 14),
+
+                // Title
+                Text(
+                  'العنوان',
+                  style: GoogleFonts.outfit(color: textSecondary, fontSize: 12),
+                ),
+                const SizedBox(height: 6),
+                _inputField(
+                  controller: _promoTitleCtrl,
+                  hint: 'عنوان العرض',
+                ),
+                const SizedBox(height: 12),
+
+                // Message
+                Text(
+                  'نص الإعلان',
+                  style: GoogleFonts.outfit(color: textSecondary, fontSize: 12),
+                ),
+                const SizedBox(height: 6),
+                _inputField(
+                  controller: _promoMessageCtrl,
+                  hint: 'تفاصيل العرض / الخصم',
+                  maxLines: 4,
+                ),
+                const SizedBox(height: 12),
+
+                // Price + Save
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'السعر',
+                            style: GoogleFonts.outfit(
+                              color: textSecondary,
+                              fontSize: 12,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          _inputField(
+                            controller: _promoPriceCtrl,
+                            hint: 'مثال: 10\$',
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'التوفير',
+                            style: GoogleFonts.outfit(
+                              color: textSecondary,
+                              fontSize: 12,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          _inputField(
+                            controller: _promoSaveCtrl,
+                            hint: 'مثال: وفّر 50%',
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+
+                // Duration hours
+                Text(
+                  'مدة العرض (بالساعات)',
+                  style: GoogleFonts.outfit(color: textSecondary, fontSize: 12),
+                ),
+                const SizedBox(height: 6),
+                _inputField(
+                  controller: _promoHoursCtrl,
+                  hint: 'اتركه فارغاً أو 0 لإلغاء العدّاد',
+                ),
+                if (_promoStoredEndsAt != null &&
+                    _promoStoredEndsAt!.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    'ينتهي العرض حالياً: ${_formatStoredEndsAt(_promoStoredEndsAt!)}',
+                    style: GoogleFonts.outfit(
+                      color: warningOrange,
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 12),
+
+                // Auto close seconds
+                Text(
+                  'ثواني الإغلاق (autoCloseSeconds)',
+                  style: GoogleFonts.outfit(color: textSecondary, fontSize: 12),
+                ),
+                const SizedBox(height: 6),
+                _inputField(
+                  controller: _promoAutoCloseCtrl,
+                  hint: '10',
+                ),
+                const SizedBox(height: 12),
+
+                // CTA text
+                Text(
+                  'نص الزر',
+                  style: GoogleFonts.outfit(color: textSecondary, fontSize: 12),
+                ),
+                const SizedBox(height: 6),
+                _inputField(
+                  controller: _promoCtaCtrl,
+                  hint: 'تواصل معايا',
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'الزر يفتح رابط تليجرام من قسم السوشيال.',
+                  style: GoogleFonts.outfit(color: textSecondary, fontSize: 10),
+                ),
+                const SizedBox(height: 18),
+
+                // Actions
+                Row(
+                  children: [
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: _promoSaving ? null : _savePromo,
+                        icon: const Icon(Icons.save_rounded, size: 16),
+                        label: Text(
+                          'حفظ العرض',
+                          style: GoogleFonts.outfit(
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: accentCyan,
+                          foregroundColor: spaceBackground,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    ElevatedButton.icon(
+                      onPressed: _promoSaving ? null : _stopPromo,
+                      icon: const Icon(Icons.stop_circle_rounded, size: 16),
+                      label: Text(
+                        'إيقاف العرض',
+                        style: GoogleFonts.outfit(fontWeight: FontWeight.bold),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: putRed,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                          vertical: 12,
+                          horizontal: 16,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
