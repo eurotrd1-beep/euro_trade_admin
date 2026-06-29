@@ -32,6 +32,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
   String _searchQuery = '';
   String _pairsSearchQuery = '';
+  String _pairsCategoryFilter = 'all'; // 'all','forex','metals','commodities','crypto'
   final _pairsSearchCtrl = TextEditingController();
   String _selectedPlatformFilter =
       'all'; // 'all', 'Quotex', 'Pocket Option', 'Expert Option'
@@ -468,14 +469,16 @@ class _AdminDashboardState extends State<AdminDashboard> {
             : <Map<String, dynamic>>[];
 
         final q = _pairsSearchQuery.toLowerCase();
-        final pairs = q.isEmpty
-            ? allPairs
-            : allPairs.where((p) {
-                final sym = (p['symbol'] as String? ?? '').toLowerCase();
-                final chartSym = (p['chart_symbol'] as String? ?? '')
-                    .toLowerCase();
-                return sym.contains(q) || chartSym.contains(q);
-              }).toList();
+        final pairs = allPairs.where((p) {
+          if (_pairsCategoryFilter != 'all' &&
+              p['category'] != _pairsCategoryFilter) {
+            return false;
+          }
+          if (q.isEmpty) return true;
+          final sym = (p['symbol'] as String? ?? '').toLowerCase();
+          final chartSym = (p['chart_symbol'] as String? ?? '').toLowerCase();
+          return sym.contains(q) || chartSym.contains(q);
+        }).toList();
 
         return Container(
           decoration: BoxDecoration(
@@ -616,6 +619,48 @@ class _AdminDashboardState extends State<AdminDashboard> {
                     onChanged: (v) => setState(() => _pairsSearchQuery = v),
                   ),
                 ),
+              // Category filter chips
+              if (allPairs.isNotEmpty)
+                SizedBox(
+                  height: 38,
+                  child: ListView(
+                    scrollDirection: Axis.horizontal,
+                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                    children: [
+                      for (final (id, label) in const [
+                        ('all', 'الكل'),
+                        ('forex', 'فوركس'),
+                        ('metals', 'معادن'),
+                        ('commodities', 'سلع'),
+                        ('crypto', 'كريبتو'),
+                      ])
+                        Padding(
+                          padding: const EdgeInsets.only(left: 8),
+                          child: ChoiceChip(
+                            label: Text(
+                              label,
+                              style: GoogleFonts.outfit(
+                                fontSize: 12,
+                                color: _pairsCategoryFilter == id
+                                    ? spaceBackground
+                                    : textPrimary,
+                              ),
+                            ),
+                            selected: _pairsCategoryFilter == id,
+                            selectedColor: accentCyan,
+                            backgroundColor: spaceBackground,
+                            side: BorderSide(
+                              color: _pairsCategoryFilter == id
+                                  ? accentCyan
+                                  : textSecondary.withValues(alpha: 0.3),
+                            ),
+                            onSelected: (_) =>
+                                setState(() => _pairsCategoryFilter = id),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
               // Pairs list
               if (allPairs.isEmpty)
                 Padding(
@@ -632,7 +677,9 @@ class _AdminDashboardState extends State<AdminDashboard> {
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
                   child: Text(
-                    'لا توجد نتائج لـ "$_pairsSearchQuery"',
+                    _pairsSearchQuery.isNotEmpty
+                        ? 'لا توجد نتائج لـ "$_pairsSearchQuery"'
+                        : 'لا توجد أزواج في هذا التصنيف',
                     style: GoogleFonts.outfit(
                       color: textSecondary,
                       fontSize: 12,
@@ -641,99 +688,105 @@ class _AdminDashboardState extends State<AdminDashboard> {
                 )
               else
                 SizedBox(
-                  height: 420,
+                  height: 150,
                   child: Scrollbar(
                     thumbVisibility: true,
-                    child: SingleChildScrollView(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          ...[
-                            'forex',
-                            'metals',
-                            'commodities',
-                            'crypto',
-                          ].expand((cat) {
-                            final catPairs = pairs
-                                .where((p) => p['category'] == cat)
-                                .toList();
-                            if (catPairs.isEmpty) return <Widget>[];
-                            return [
-                              Padding(
-                                padding: const EdgeInsets.fromLTRB(
-                                  16,
-                                  12,
-                                  16,
-                                  4,
+                    child: ListView.builder(
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.fromLTRB(12, 10, 12, 16),
+                      itemCount: pairs.length,
+                      itemBuilder: (context, i) {
+                        final pair = pairs[i];
+                        final cat = pair['category'] as String? ?? '';
+                        return Container(
+                          width: 170,
+                          margin: const EdgeInsets.only(left: 10),
+                          padding: const EdgeInsets.fromLTRB(12, 10, 8, 8),
+                          decoration: BoxDecoration(
+                            color: spaceBackground,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: borderGlow),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 3,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: accentCyan.withAlpha(25),
+                                  borderRadius: BorderRadius.circular(6),
                                 ),
                                 child: Text(
                                   catLabels[cat] ?? cat,
                                   style: GoogleFonts.outfit(
-                                    color: textSecondary,
-                                    fontSize: 11,
+                                    color: accentCyan,
+                                    fontSize: 10,
                                     fontWeight: FontWeight.w600,
                                   ),
                                 ),
                               ),
-                              ...catPairs.map(
-                                (pair) => ListTile(
-                                  dense: true,
-                                  contentPadding: const EdgeInsets.fromLTRB(
-                                    16,
-                                    0,
-                                    4,
-                                    0,
-                                  ),
-                                  title: Text(
-                                    pair['symbol'] as String? ?? '',
-                                    style: GoogleFonts.outfit(
-                                      color: textPrimary,
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                  subtitle: Text(
-                                    pair['chart_symbol'] as String? ?? '',
-                                    style: GoogleFonts.outfit(
-                                      color: textSecondary,
-                                      fontSize: 10,
-                                    ),
-                                  ),
-                                  trailing: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      IconButton(
-                                        icon: Icon(
-                                          Icons.edit_rounded,
-                                          color: accentCyan,
-                                          size: 16,
-                                        ),
-                                        tooltip: 'تعديل',
-                                        onPressed: () =>
-                                            _showEditPairDialog(pair),
-                                      ),
-                                      IconButton(
-                                        icon: Icon(
-                                          Icons.delete_outline_rounded,
-                                          color: putRed,
-                                          size: 16,
-                                        ),
-                                        tooltip: 'حذف',
-                                        onPressed: () => Supabase
-                                            .instance.client
-                                            .from('pairs')
-                                            .delete()
-                                            .eq('id', pair['id'] as String),
-                                      ),
-                                    ],
-                                  ),
+                              const SizedBox(height: 8),
+                              Text(
+                                pair['symbol'] as String? ?? '',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: GoogleFonts.outfit(
+                                  color: textPrimary,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.bold,
                                 ),
                               ),
-                            ];
-                          }),
-                          const SizedBox(height: 8),
-                        ],
-                      ),
+                              const SizedBox(height: 2),
+                              Text(
+                                pair['chart_symbol'] as String? ?? '',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: GoogleFonts.outfit(
+                                  color: textSecondary,
+                                  fontSize: 10,
+                                ),
+                              ),
+                              const Spacer(),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.end,
+                                children: [
+                                  IconButton(
+                                    visualDensity: VisualDensity.compact,
+                                    constraints: const BoxConstraints(),
+                                    padding: const EdgeInsets.all(4),
+                                    icon: Icon(
+                                      Icons.edit_rounded,
+                                      color: accentCyan,
+                                      size: 16,
+                                    ),
+                                    tooltip: 'تعديل',
+                                    onPressed: () => _showEditPairDialog(pair),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  IconButton(
+                                    visualDensity: VisualDensity.compact,
+                                    constraints: const BoxConstraints(),
+                                    padding: const EdgeInsets.all(4),
+                                    icon: Icon(
+                                      Icons.delete_outline_rounded,
+                                      color: putRed,
+                                      size: 16,
+                                    ),
+                                    tooltip: 'حذف',
+                                    onPressed: () => Supabase.instance.client
+                                        .from('pairs')
+                                        .delete()
+                                        .eq('id', pair['id'] as String),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        );
+                      },
                     ),
                   ),
                 ),
