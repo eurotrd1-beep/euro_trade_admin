@@ -1,25 +1,14 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'firebase_options.dart';
 import 'supabase_config.dart';
 import 'screens/admin_dashboard.dart';
 
-@pragma('vm:entry-point')
-Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
-  // Firebase is already initialized by this point.
-  // System tray handles notification display automatically.
-}
-
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
   try {
-    await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-    FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+    await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
   } catch (e) {
-    debugPrint('Firebase init failed: $e');
+    debugPrint('Supabase init failed: $e');
   }
   runApp(const EuroTradeAdminApp());
 }

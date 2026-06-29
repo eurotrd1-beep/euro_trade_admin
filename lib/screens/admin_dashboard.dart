@@ -3,20 +3,12 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart' show DateFormat;
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:http/http.dart' as http;
-import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
 import 'package:file_picker/file_picker.dart';
 import '../utils/js_bridge.dart';
-
-// Notification plugin instance — initialized once in initState
-final FlutterLocalNotificationsPlugin _localNotif =
-    FlutterLocalNotificationsPlugin();
 
 class AdminDashboard extends StatefulWidget {
   const AdminDashboard({super.key});
@@ -45,14 +37,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
       'all'; // 'all', 'Quotex', 'Pocket Option', 'Expert Option'
   String _selectedRoleFilter = 'all'; // 'all', 'vip', 'standard'
   int _activeTabIndex = 0;
-
-  // ── Push Notifications state ────────────────────────────────────
-  final _pushTitleCtrl = TextEditingController();
-  final _pushBodyCtrl = TextEditingController();
-  final _pushSaJsonCtrl = TextEditingController();
-  bool _pushSending = false;
-  String _pushStatusMsg = '';
-  bool _pushStatusOk = false;
 
   // ── New user live alerts ─────────────────────────────────────────
   StreamSubscription<List<Map<String, dynamic>>>? _newUserSubscription;
@@ -774,95 +758,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
   @override
   void initState() {
     super.initState();
-    _initAdminFcm();
     _startNewUserListener();
-    _loadFcmCredentials();
-  }
-
-  Future<void> _initAdminFcm() async {
-    try {
-      if (!kIsWeb) {
-        // Android only: init local notifications + create channel
-        const android = AndroidInitializationSettings('@mipmap/ic_launcher');
-        await _localNotif.initialize(
-          const InitializationSettings(android: android),
-        );
-        const channel = AndroidNotificationChannel(
-          'admin_alerts',
-          'تنبيهات الأدمن',
-          description: 'إشعارات التسجيل الجديد',
-          importance: Importance.max,
-          playSound: true,
-          enableVibration: true,
-        );
-        await _localNotif
-            .resolvePlatformSpecificImplementation<
-              AndroidFlutterLocalNotificationsPlugin
-            >()
-            ?.createNotificationChannel(channel);
-      }
-
-      final messaging = FirebaseMessaging.instance;
-      await messaging.requestPermission(alert: true, badge: true, sound: true);
-
-      // Web needs VAPID key; Android does not
-      final token = kIsWeb
-          ? null // web token saving handled separately if VAPID key configured
-          : await messaging.getToken();
-
-      if (token != null && token.isNotEmpty) {
-        await Supabase.instance.client.from('configs').upsert({
-          'id': 'adminFcmToken',
-          'data': {
-            'token': token,
-            'updated_at': DateTime.now().toIso8601String(),
-          },
-        });
-      }
-
-      if (!kIsWeb) {
-        messaging.onTokenRefresh.listen((newToken) {
-          Supabase.instance.client.from('configs').upsert({
-            'id': 'adminFcmToken',
-            'data': {
-              'token': newToken,
-              'updated_at': DateTime.now().toIso8601String(),
-            },
-          });
-        });
-      }
-
-      // Handle FCM messages arriving while app is in foreground
-      FirebaseMessaging.onMessage.listen((msg) {
-        final title = msg.notification?.title ?? 'مستخدم جديد';
-        final body = msg.notification?.body ?? '';
-        if (!kIsWeb) _showLocalNotification(title, body);
-      });
-    } catch (e) {
-      debugPrint('Admin FCM init error: $e');
-    }
-  }
-
-  Future<void> _showLocalNotification(String title, String body) async {
-    if (kIsWeb) return;
-    const details = NotificationDetails(
-      android: AndroidNotificationDetails(
-        'admin_alerts',
-        'تنبيهات الأدمن',
-        channelDescription: 'إشعارات التسجيل الجديد',
-        importance: Importance.max,
-        priority: Priority.high,
-        playSound: true,
-        enableVibration: true,
-        icon: '@mipmap/ic_launcher',
-      ),
-    );
-    await _localNotif.show(
-      DateTime.now().millisecondsSinceEpoch ~/ 1000 % 100000,
-      title,
-      body,
-      details,
-    );
   }
 
   void _startNewUserListener() {
@@ -910,12 +806,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
           r'''(function(){try{var C=new(window.AudioContext||window.webkitAudioContext)();function tone(f,s,d){var o=C.createOscillator(),g=C.createGain();o.type="sine";o.frequency.value=f;g.gain.setValueAtTime(0.35,C.currentTime+s);g.gain.exponentialRampToValueAtTime(0.001,C.currentTime+s+d);o.connect(g);g.connect(C.destination);o.start(C.currentTime+s);o.stop(C.currentTime+s+d+0.01);}tone(880,0,0.12);tone(1100,0.15,0.18);}catch(e){}})();''',
         );
       } catch (_) {}
-    } else {
-      // Android: show heads-up notification which plays system alert sound
-      _showLocalNotification(
-        '🔔 مستخدم جديد!',
-        'تحقق من قائمة المستخدمين الجديدة',
-      );
     }
   }
 
@@ -1010,190 +900,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
     });
   }
 
-  Future<void> _loadFcmCredentials() async {
-    try {
-      final row = await Supabase.instance.client
-          .from('configs')
-          .select('data')
-          .eq('id', 'fcm')
-          .maybeSingle();
-      if (row != null) {
-        final data = row['data'] as Map<String, dynamic>? ?? {};
-        final email = data['clientEmail'] as String? ?? '';
-        if (email.isNotEmpty && mounted) {
-          setState(() => _pushSaJsonCtrl.text = '✅ بيانات محفوظة: $email');
-        }
-      }
-    } catch (_) {}
-  }
-
-  Future<void> _saveFcmCredentials() async {
-    final raw = _pushSaJsonCtrl.text.trim();
-    try {
-      final parsed = jsonDecode(raw) as Map<String, dynamic>;
-      final email = parsed['client_email'] as String? ?? '';
-      final key = parsed['private_key'] as String? ?? '';
-      final project = parsed['project_id'] as String? ?? '';
-      if (email.isEmpty || key.isEmpty || project.isEmpty) {
-        setState(() {
-          _pushStatusMsg = 'ملف JSON غير صحيح أو ناقص';
-          _pushStatusOk = false;
-        });
-        return;
-      }
-      await Supabase.instance.client.from('configs').upsert({
-        'id': 'fcm',
-        'data': {
-          'clientEmail': email,
-          'privateKey': key,
-          'projectId': project,
-        },
-      });
-      setState(() {
-        _pushStatusMsg = '✅ تم حفظ بيانات Service Account';
-        _pushStatusOk = true;
-        _pushSaJsonCtrl.text = '✅ بيانات محفوظة: $email';
-      });
-    } catch (e) {
-      setState(() {
-        _pushStatusMsg = 'ملف JSON غير صحيح: $e';
-        _pushStatusOk = false;
-      });
-    }
-  }
-
-  Future<String> _getFcmAccessToken(
-    String clientEmail,
-    String privateKey,
-  ) async {
-    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final jwt = JWT({
-      'iss': clientEmail,
-      'scope': 'https://www.googleapis.com/auth/firebase.messaging',
-      'aud': 'https://oauth2.googleapis.com/token',
-      'iat': now,
-      'exp': now + 3600,
-    });
-    final signed = jwt.sign(
-      RSAPrivateKey(privateKey),
-      algorithm: JWTAlgorithm.RS256,
-    );
-    final res = await http.post(
-      Uri.parse('https://oauth2.googleapis.com/token'),
-      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body:
-          'grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=$signed',
-    );
-    final data = jsonDecode(res.body) as Map<String, dynamic>;
-    final token = data['access_token'] as String?;
-    if (token == null)
-      throw Exception('فشل الحصول على access token: ${res.body}');
-    return token;
-  }
-
-  Future<void> _sendPushNotification() async {
-    final title = _pushTitleCtrl.text.trim();
-    final body = _pushBodyCtrl.text.trim();
-    if (title.isEmpty || body.isEmpty) {
-      setState(() {
-        _pushStatusMsg = 'أدخل العنوان والنص أولاً';
-        _pushStatusOk = false;
-      });
-      return;
-    }
-    setState(() {
-      _pushSending = true;
-      _pushStatusMsg = '';
-    });
-    try {
-      final fcmRow = await Supabase.instance.client
-          .from('configs')
-          .select('data')
-          .eq('id', 'fcm')
-          .maybeSingle();
-      final fcmData = fcmRow != null ? fcmRow['data'] as Map<String, dynamic>? ?? {} : <String, dynamic>{};
-      final clientEmail = fcmData['clientEmail'] as String? ?? '';
-      final privateKey = fcmData['privateKey'] as String? ?? '';
-      final projectId = fcmData['projectId'] as String? ?? '';
-      if (clientEmail.isEmpty || privateKey.isEmpty || projectId.isEmpty) {
-        setState(() {
-          _pushStatusMsg = 'الصق Service Account JSON واحفظه أولاً';
-          _pushStatusOk = false;
-          _pushSending = false;
-        });
-        return;
-      }
-
-      final accessToken = await _getFcmAccessToken(clientEmail, privateKey);
-
-      final rows = await Supabase.instance.client.from('users').select();
-      final tokens = rows
-          .map((d) => d['fcm_token'] as String?)
-          .where((t) => t != null && t.isNotEmpty)
-          .cast<String>()
-          .toList();
-
-      if (tokens.isEmpty) {
-        setState(() {
-          _pushStatusMsg = 'لا يوجد مستخدمون لديهم توكن مسجّل';
-          _pushStatusOk = false;
-          _pushSending = false;
-        });
-        return;
-      }
-
-      int sent = 0;
-      for (final token in tokens) {
-        try {
-          final res = await http.post(
-            Uri.parse(
-              'https://fcm.googleapis.com/v1/projects/$projectId/messages:send',
-            ),
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': 'Bearer $accessToken',
-            },
-            body: jsonEncode({
-              'message': {
-                'token': token,
-                'notification': {'title': title, 'body': body},
-                'android': {'priority': 'high'},
-                'apns': {
-                  'payload': {
-                    'aps': {'sound': 'default'},
-                  },
-                },
-                'data': {'type': 'admin_broadcast'},
-              },
-            }),
-          );
-          if (res.statusCode == 200) sent++;
-        } catch (_) {}
-      }
-
-      setState(() {
-        _pushStatusMsg = '✅ تم الإرسال لـ $sent مستخدم من أصل ${tokens.length}';
-        _pushStatusOk = true;
-        _pushSending = false;
-      });
-      _pushTitleCtrl.clear();
-      _pushBodyCtrl.clear();
-    } catch (e) {
-      setState(() {
-        _pushStatusMsg = 'خطأ: $e';
-        _pushStatusOk = false;
-        _pushSending = false;
-      });
-    }
-  }
-
   @override
   void dispose() {
     _newUserSubscription?.cancel();
     _newUserOverlay?.remove();
-    _pushTitleCtrl.dispose();
-    _pushBodyCtrl.dispose();
-    _pushSaJsonCtrl.dispose();
     _globalVipValueController.dispose();
     _brNameCtrl.dispose();
     _brLogoCtrl.dispose();
@@ -1653,7 +1363,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
                         _buildAppUpdatesView(),
                         _buildAppControlView(),
                         _buildSiteThemeView(),
-                        _buildPushNotificationView(),
                       ],
                     ),
                   ),
@@ -1899,11 +1608,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
             'ثيم الموقع الكامل 🎨',
             Icons.palette_rounded,
           ),
-          _buildSidebarNavItem(
-            7,
-            'إشعارات فورية 🔔',
-            Icons.notifications_active_rounded,
-          ),
           const Spacer(),
           Padding(
             padding: const EdgeInsets.all(20),
@@ -1968,7 +1672,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
             _buildMobileTabItem(4, 'تحديث'),
             _buildMobileTabItem(5, 'تحكم'),
             _buildMobileTabItem(6, 'الثيم 🎨'),
-            _buildMobileTabItem(7, 'إشعارات 🔔'),
           ],
         ),
       ),
@@ -6714,247 +6417,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
         ),
       );
     }
-  }
-
-  // VIEW 8: Push Notifications
-  Widget _buildPushNotificationView() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // ── Header ─────────────────────────────────────────────────
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: Colors.orange.withAlpha(20),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: const Icon(
-                  Icons.notifications_active_rounded,
-                  color: Colors.orange,
-                  size: 22,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'إشعارات فورية للمستخدمين',
-                    style: GoogleFonts.outfit(
-                      color: textPrimary,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 16,
-                    ),
-                  ),
-                  Text(
-                    'إرسال push notification لكل المستخدمين المُسجَّلين',
-                    style: GoogleFonts.outfit(
-                      color: textSecondary,
-                      fontSize: 11,
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-          const SizedBox(height: 24),
-
-          // ── Service Account JSON ────────────────────────────────────
-          _pushCard(
-            title: '🔑 Service Account JSON',
-            subtitle:
-                'الصق محتوى ملف JSON من Firebase Console → Project Settings → Service Accounts',
-            child: _inputField(
-              controller: _pushSaJsonCtrl,
-              hint: '{ "type": "service_account", "project_id": "...", ... }',
-              maxLines: 4,
-              suffix: TextButton(
-                onPressed: _saveFcmCredentials,
-                child: Text(
-                  'حفظ',
-                  style: GoogleFonts.outfit(color: accentCyan, fontSize: 12),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-
-          // ── Compose Notification ───────────────────────────────────
-          _pushCard(
-            title: '✍️ إنشاء الإشعار',
-            child: Column(
-              children: [
-                _inputField(
-                  controller: _pushTitleCtrl,
-                  hint: 'عنوان الإشعار — مثال: إشارة قوية على EUR/USD 🔥',
-                ),
-                const SizedBox(height: 10),
-                _inputField(
-                  controller: _pushBodyCtrl,
-                  hint:
-                      'نص الإشعار — مثال: إشارة CALL لمدة دقيقة واحدة، ادخل الآن!',
-                  maxLines: 3,
-                ),
-                const SizedBox(height: 16),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed: _pushSending ? null : _sendPushNotification,
-                    icon: _pushSending
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(
-                              color: Colors.white,
-                              strokeWidth: 2,
-                            ),
-                          )
-                        : const Icon(Icons.send_rounded, size: 18),
-                    label: Text(
-                      _pushSending ? 'جاري الإرسال...' : 'إرسال للجميع',
-                      style: GoogleFonts.outfit(fontWeight: FontWeight.bold),
-                    ),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.orange,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                    ),
-                  ),
-                ),
-                if (_pushStatusMsg.isNotEmpty) ...[
-                  const SizedBox(height: 12),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 10,
-                    ),
-                    decoration: BoxDecoration(
-                      color: (_pushStatusOk ? callGreen : putRed).withAlpha(20),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(
-                        color: (_pushStatusOk ? callGreen : putRed).withAlpha(
-                          80,
-                        ),
-                      ),
-                    ),
-                    child: Text(
-                      _pushStatusMsg,
-                      style: GoogleFonts.outfit(
-                        color: _pushStatusOk ? callGreen : putRed,
-                        fontSize: 12,
-                      ),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-          const SizedBox(height: 16),
-
-          // ── Live New Users feed ────────────────────────────────────
-          _pushCard(
-            title: '🟢 تسجيلات مباشرة (منذ فتح الأدمن)',
-            child: _liveNewUsers.isEmpty
-                ? Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    child: Center(
-                      child: Text(
-                        'لا يوجد تسجيلات جديدة بعد',
-                        style: GoogleFonts.outfit(
-                          color: textSecondary,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ),
-                  )
-                : Column(
-                    children: _liveNewUsers
-                        .take(20)
-                        .map(
-                          (u) => ListTile(
-                            dense: true,
-                            contentPadding: EdgeInsets.zero,
-                            leading: const CircleAvatar(
-                              radius: 16,
-                              backgroundColor: Color(0xFF1F2937),
-                              child: Icon(
-                                Icons.person_rounded,
-                                size: 16,
-                                color: callGreen,
-                              ),
-                            ),
-                            title: Text(
-                              'ID: ${u['accountId']}',
-                              style: GoogleFonts.outfit(
-                                color: textPrimary,
-                                fontSize: 12,
-                              ),
-                            ),
-                            subtitle: Text(
-                              '${u['broker']} — ${DateFormat('HH:mm:ss').format(u['time'] as DateTime)}',
-                              style: GoogleFonts.outfit(
-                                color: textSecondary,
-                                fontSize: 10,
-                              ),
-                            ),
-                            trailing: const Icon(
-                              Icons.fiber_new_rounded,
-                              color: callGreen,
-                              size: 18,
-                            ),
-                          ),
-                        )
-                        .toList(),
-                  ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _pushCard({
-    required String title,
-    String? subtitle,
-    required Widget child,
-  }) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: cardBgColor,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: borderGlow),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            title,
-            style: GoogleFonts.outfit(
-              color: textPrimary,
-              fontWeight: FontWeight.bold,
-              fontSize: 13,
-            ),
-          ),
-          if (subtitle != null) ...[
-            const SizedBox(height: 4),
-            Text(
-              subtitle,
-              style: GoogleFonts.outfit(color: textSecondary, fontSize: 10),
-            ),
-          ],
-          const SizedBox(height: 14),
-          child,
-        ],
-      ),
-    );
   }
 
   Widget _inputField({
