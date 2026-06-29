@@ -43,6 +43,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
   final List<Map<String, dynamic>> _liveNewUsers = [];
   OverlayEntry? _newUserOverlay;
 
+  // ── Database size warning ────────────────────────────────────────
+  double? _dbSizeMb;
+  Timer? _dbSizeTimer;
+
   // Controllers for Global VIP
   final _globalVipValueController = TextEditingController(text: '30');
   String _globalVipUnit = 'days';
@@ -759,6 +763,55 @@ class _AdminDashboardState extends State<AdminDashboard> {
   void initState() {
     super.initState();
     _startNewUserListener();
+    _fetchDbSize();
+    _dbSizeTimer = Timer.periodic(
+      const Duration(minutes: 5),
+      (_) => _fetchDbSize(),
+    );
+  }
+
+  Future<void> _fetchDbSize() async {
+    try {
+      final result = await Supabase.instance.client.rpc('db_size_mb');
+      final size = double.tryParse(result.toString());
+      if (size == null) return;
+      if (!mounted) return;
+      setState(() => _dbSizeMb = size);
+    } catch (e) {
+      // Ignore errors: don't crash the dashboard or show a false warning.
+      debugPrint('db_size_mb fetch failed: $e');
+    }
+  }
+
+  Widget _buildDbSizeWarning() {
+    final size = _dbSizeMb;
+    if (size == null || size < 450) return const SizedBox.shrink();
+    final isFull = size >= 500;
+    final sizeStr = size.toStringAsFixed(1);
+    final message = isFull
+        ? 'قاعدة البيانات ممتلئة ($sizeStr/500MB) — لن يتم حفظ بيانات جديدة'
+        : 'تحذير: قاعدة البيانات شبه ممتلئة ($sizeStr/500MB)';
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      color: isFull ? putRed : warningOrange,
+      child: Row(
+        children: [
+          const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 22),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              message,
+              style: GoogleFonts.outfit(
+                color: Colors.white,
+                fontSize: 14,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   void _startNewUserListener() {
@@ -903,6 +956,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
   @override
   void dispose() {
     _newUserSubscription?.cancel();
+    _dbSizeTimer?.cancel();
     _newUserOverlay?.remove();
     _globalVipValueController.dispose();
     _brNameCtrl.dispose();
@@ -1345,6 +1399,9 @@ class _AdminDashboardState extends State<AdminDashboard> {
             Expanded(
               child: Column(
                 children: [
+                  // Database almost-full warning banner (always visible)
+                  _buildDbSizeWarning(),
+
                   // Tab selector for Mobile layout
                   if (!isDesktop) _buildMobileTabSelector(),
 
