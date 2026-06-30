@@ -34,6 +34,11 @@ class _AdminDashboardState extends State<AdminDashboard> {
   String _pairsSearchQuery = '';
   String _pairsCategoryFilter = 'all'; // 'all','forex','metals','commodities','crypto'
   final _pairsSearchCtrl = TextEditingController();
+
+  // ── OTC pairs library state ─────────────────────────────────────
+  String _otcSearchQuery = '';
+  final _otcSearchCtrl = TextEditingController();
+  bool _otcScanRequesting = false;
   String _selectedPlatformFilter =
       'all'; // 'all', 'Quotex', 'Pocket Option', 'Expert Option'
   String _selectedRoleFilter = 'all'; // 'all', 'vip', 'standard'
@@ -450,12 +455,475 @@ class _AdminDashboardState extends State<AdminDashboard> {
   }
 
 
+  // ══════════════════════════════════════════════════════════════════
+  // VIEW 9 — OTC PAIRS LIBRARY (Pocket Option) — single source of truth
+  // for OTC pairs. "جلب الأزواج" asks the scraper to discover pairs; each
+  // pair can be classified + enabled. Enabling a pair auto-adds it to the
+  // trading pairs list (category 'otc') shown in App Control + the user app.
+  // ══════════════════════════════════════════════════════════════════
+  static const Map<String, String> _otcCatLabels = {
+    'forex': 'فوركس',
+    'metals': 'معادن',
+    'commodities': 'سلع',
+    'crypto': 'كريبتو',
+  };
+
+  Future<void> _requestOtcScan() async {
+    setState(() => _otcScanRequesting = true);
+    try {
+      final sb = Supabase.instance.client;
+      final now = DateTime.now().toUtc().toIso8601String();
+      Map<String, dynamic> cur = {};
+      try {
+        final row = await sb
+            .from('configs')
+            .select('data')
+            .eq('id', 'otc_scan')
+            .maybeSingle();
+        cur = (row?['data'] as Map<String, dynamic>?) ?? {};
+      } catch (_) {}
+      await sb.from('configs').upsert({
+        'id': 'otc_scan',
+        'data': {
+          ...cur,
+          'requestedAt': now,
+          'status': 'requested',
+          'message': 'تم إرسال طلب الجلب للسيرفر…',
+          'updatedAt': now,
+        },
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'تم إرسال طلب جلب الأزواج — انتظر السيرفر يكمل البحث',
+              style: GoogleFonts.outfit(),
+            ),
+            backgroundColor: accentCyan,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('خطأ: $e'), backgroundColor: putRed),
+        );
+      }
+    } finally {
+      // Re-enable the button shortly after; the scraper reports real progress
+      // via the otc_scan status stream below.
+      Future.delayed(const Duration(seconds: 3), () {
+        if (mounted) setState(() => _otcScanRequesting = false);
+      });
+    }
+  }
+
+  Future<void> _setOtcSubcategory(Map<String, dynamic> pair, String cat) async {
+    final sb = Supabase.instance.client;
+    try {
+      await sb
+          .from('otc_pairs')
+          .update({'subcategory': cat, 'updated_at': DateTime.now().toUtc().toIso8601String()})
+          .eq('id', pair['id'] as String);
+      // Keep the synced trading-pair row's subtype in step (only if enabled).
+      if (pair['enabled'] == true) {
+        await sb
+            .from('pairs')
+            .update({'type': cat})
+            .eq('chart_symbol', pair['symbol'] as String? ?? '')
+            .eq('category', 'otc');
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('خطأ: $e'), backgroundColor: putRed),
+        );
+      }
+    }
+  }
+
+  // Toggling the switch is the SINGLE control: it flips otc_pairs.enabled AND
+  // syncs the trading pairs list — enabling adds an 'otc' pair (so it appears
+  // in App Control + the user app), disabling removes it.
+  Future<void> _toggleOtcPair(Map<String, dynamic> pair, bool enabled) async {
+    final sb = Supabase.instance.client;
+    final symbol = (pair['symbol'] as String? ?? '').trim();
+    final name = (pair['name'] as String? ?? '').trim();
+    final sub = (pair['subcategory'] as String? ?? 'forex');
+    if (symbol.isEmpty) return;
+    try {
+      await sb
+          .from('otc_pairs')
+          .update({'enabled': enabled, 'updated_at': DateTime.now().toUtc().toIso8601String()})
+          .eq('id', pair['id'] as String);
+
+      if (enabled) {
+        // Auto-add to the trading pairs list. Remove any stale row first so we
+        // never create duplicates, then insert a fresh 'otc'-category row.
+        // chart_symbol carries NO ':' so the TradingView scraper ignores it.
+        await sb.from('pairs').delete().eq('chart_symbol', symbol).eq('category', 'otc');
+        await sb.from('pairs').insert({
+          'symbol': name.isNotEmpty ? name : symbol,
+          'chart_symbol': symbol,
+          'category': 'otc',
+          'type': sub,
+          'order': DateTime.now().millisecondsSinceEpoch,
+        });
+      } else {
+        // Auto-remove from the trading pairs list.
+        await sb.from('pairs').delete().eq('chart_symbol', symbol).eq('category', 'otc');
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('خطأ: $e'), backgroundColor: putRed),
+        );
+      }
+    }
+  }
+
+  Widget _buildOtcLibraryView() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'مكتبة أزواج OTC',
+            style: GoogleFonts.outfit(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: textPrimary,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'المصدر الوحيد لأزواج OTC — فعّل الزوج عشان يظهر تلقائيًا في أزواج التداول وعند المستخدم.',
+            style: GoogleFonts.outfit(fontSize: 12, color: textSecondary),
+          ),
+          const SizedBox(height: 14),
+          _buildOtcStatusBar(),
+          const SizedBox(height: 14),
+          _buildOtcPairsList(),
+        ],
+      ),
+    );
+  }
+
+  // Live scraper + scan status from configs (otc_scan + otc_status).
+  Widget _buildOtcStatusBar() {
+    return StreamBuilder<List<Map<String, dynamic>>>(
+      stream: Supabase.instance.client
+          .from('configs')
+          .stream(primaryKey: ['id']),
+      builder: (context, snap) {
+        final rows = snap.data ?? [];
+        Map<String, dynamic> scan = {};
+        Map<String, dynamic> status = {};
+        for (final r in rows) {
+          if (r['id'] == 'otc_scan') scan = (r['data'] as Map<String, dynamic>?) ?? {};
+          if (r['id'] == 'otc_status') status = (r['data'] as Map<String, dynamic>?) ?? {};
+        }
+        final connected = status['connected'] == true;
+        final loggedIn = status['loggedIn'] == true;
+        final scanStatus = scan['status'] as String? ?? 'idle';
+        final scanMsg = scan['message'] as String? ?? '';
+        final lastErr = status['lastError'] as String? ?? '';
+        final scanning = scanStatus == 'scanning' || scanStatus == 'requested';
+
+        Color dotColor;
+        String stateLabel;
+        if (connected && loggedIn) {
+          dotColor = callGreen;
+          stateLabel = 'متصل بـ Pocket Option';
+        } else if (connected) {
+          dotColor = warningOrange;
+          stateLabel = 'متصل — جاري تسجيل الدخول';
+        } else {
+          dotColor = putRed;
+          stateLabel = 'غير متصل';
+        }
+
+        return Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: cardBgColor,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: borderGlow),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(color: dotColor, shape: BoxShape.circle),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    stateLabel,
+                    style: GoogleFonts.outfit(
+                      color: textPrimary,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const Spacer(),
+                  ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: accentCyan,
+                      foregroundColor: spaceBackground,
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                    icon: (_otcScanRequesting || scanning)
+                        ? const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor: AlwaysStoppedAnimation(Color(0xFF030712)),
+                            ),
+                          )
+                        : const Icon(Icons.download_rounded, size: 16),
+                    label: Text(
+                      scanning ? 'جاري الجلب…' : 'جلب الأزواج',
+                      style: GoogleFonts.outfit(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    onPressed: (_otcScanRequesting || scanning) ? null : _requestOtcScan,
+                  ),
+                ],
+              ),
+              if (scanMsg.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(
+                  scanMsg,
+                  style: GoogleFonts.outfit(
+                    color: scanStatus == 'error' ? putRed : textSecondary,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+              if (lastErr.isNotEmpty && !connected) ...[
+                const SizedBox(height: 4),
+                Text(
+                  'آخر خطأ: $lastErr',
+                  style: GoogleFonts.outfit(color: putRed, fontSize: 10),
+                ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildOtcPairsList() {
+    return StreamBuilder<List<Map<String, dynamic>>>(
+      stream: Supabase.instance.client
+          .from('otc_pairs')
+          .stream(primaryKey: ['id']),
+      builder: (context, snap) {
+        final all = snap.hasData
+            ? ((snap.data ?? [])
+              ..sort((a, b) => ((a['order'] as int? ?? 0)
+                  .compareTo(b['order'] as int? ?? 0))))
+            : <Map<String, dynamic>>[];
+
+        final q = _otcSearchQuery.toLowerCase();
+        final pairs = all.where((p) {
+          if (q.isEmpty) return true;
+          final n = (p['name'] as String? ?? '').toLowerCase();
+          final s = (p['symbol'] as String? ?? '').toLowerCase();
+          return n.contains(q) || s.contains(q);
+        }).toList();
+
+        final enabledCount = all.where((p) => p['enabled'] == true).length;
+
+        return Container(
+          decoration: BoxDecoration(
+            color: cardBgColor,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: borderGlow),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+                child: Row(
+                  children: [
+                    Icon(Icons.hub_rounded, color: accentCyan, size: 20),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'الأزواج المتاحة',
+                            style: GoogleFonts.outfit(
+                              color: textPrimary,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 14,
+                            ),
+                          ),
+                          Text(
+                            '${all.length} زوج · $enabledCount مفعّل',
+                            style: GoogleFonts.outfit(
+                              color: textSecondary,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1, color: Color(0xFF1F2937)),
+              if (all.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+                  child: TextField(
+                    controller: _otcSearchCtrl,
+                    style: GoogleFonts.outfit(color: textPrimary, fontSize: 13),
+                    decoration: InputDecoration(
+                      hintText: 'ابحث عن زوج OTC...',
+                      hintStyle: GoogleFonts.outfit(color: textSecondary, fontSize: 12),
+                      prefixIcon: Icon(Icons.search_rounded, color: textSecondary, size: 18),
+                      filled: true,
+                      fillColor: spaceBackground,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: BorderSide(color: borderGlow),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: BorderSide(color: borderGlow),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: BorderSide(color: accentCyan),
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    ),
+                    onChanged: (v) => setState(() => _otcSearchQuery = v),
+                  ),
+                ),
+              if (all.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.all(28),
+                  child: Column(
+                    children: [
+                      Icon(Icons.inbox_rounded, color: textSecondary, size: 40),
+                      const SizedBox(height: 10),
+                      Text(
+                        'لا توجد أزواج بعد — اضغط «جلب الأزواج» لسحبها من Pocket Option',
+                        textAlign: TextAlign.center,
+                        style: GoogleFonts.outfit(color: textSecondary, fontSize: 12),
+                      ),
+                    ],
+                  ),
+                )
+              else
+                ListView.separated(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: pairs.length,
+                  separatorBuilder: (_, __) =>
+                      const Divider(height: 1, color: Color(0xFF1F2937)),
+                  itemBuilder: (context, i) => _buildOtcPairRow(pairs[i]),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildOtcPairRow(Map<String, dynamic> pair) {
+    final name = pair['name'] as String? ?? '';
+    final symbol = pair['symbol'] as String? ?? '';
+    final sub = pair['subcategory'] as String? ?? 'forex';
+    final enabled = pair['enabled'] == true;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name.isNotEmpty ? name : symbol,
+                  style: GoogleFonts.outfit(
+                    color: textPrimary,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13,
+                  ),
+                ),
+                Text(
+                  symbol,
+                  style: GoogleFonts.robotoMono(
+                    color: textSecondary,
+                    fontSize: 10,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // Subcategory dropdown
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            decoration: BoxDecoration(
+              color: spaceBackground,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: borderGlow),
+            ),
+            child: DropdownButtonHideUnderline(
+              child: DropdownButton<String>(
+                value: _otcCatLabels.containsKey(sub) ? sub : 'forex',
+                isDense: true,
+                dropdownColor: cardBgColor,
+                style: GoogleFonts.outfit(color: textPrimary, fontSize: 12),
+                items: _otcCatLabels.entries
+                    .map((e) => DropdownMenuItem(
+                          value: e.key,
+                          child: Text(e.value),
+                        ))
+                    .toList(),
+                onChanged: (v) {
+                  if (v != null) _setOtcSubcategory(pair, v);
+                },
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Switch(
+            value: enabled,
+            activeColor: callGreen,
+            onChanged: (v) => _toggleOtcPair(pair, v),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildPairsSection() {
     const catLabels = {
       'forex': 'فوركس',
       'metals': 'معادن',
       'commodities': 'سلع',
       'crypto': 'كريبتو',
+      'otc': 'OTC',
     };
     return StreamBuilder<List<Map<String, dynamic>>>(
       stream: Supabase.instance.client
@@ -633,6 +1101,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                         ('metals', 'معادن'),
                         ('commodities', 'سلع'),
                         ('crypto', 'كريبتو'),
+                        ('otc', 'OTC'),
                       ])
                         Padding(
                           padding: const EdgeInsets.only(left: 8),
@@ -750,39 +1219,63 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                 ),
                               ),
                               const Spacer(),
-                              Row(
-                                mainAxisAlignment: MainAxisAlignment.end,
-                                children: [
-                                  IconButton(
-                                    visualDensity: VisualDensity.compact,
-                                    constraints: const BoxConstraints(),
-                                    padding: const EdgeInsets.all(4),
-                                    icon: Icon(
-                                      Icons.edit_rounded,
-                                      color: accentCyan,
-                                      size: 16,
+                              // OTC pairs are managed exclusively from the OTC
+                              // library (toggle there) — no manual edit/delete
+                              // here, to keep both lists in sync.
+                              if (cat == 'otc')
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.end,
+                                  children: [
+                                    Icon(Icons.lock_rounded,
+                                        color: textSecondary, size: 12),
+                                    const SizedBox(width: 4),
+                                    Flexible(
+                                      child: Text(
+                                        'يُدار من مكتبة OTC',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: GoogleFonts.outfit(
+                                          color: textSecondary,
+                                          fontSize: 9,
+                                        ),
+                                      ),
                                     ),
-                                    tooltip: 'تعديل',
-                                    onPressed: () => _showEditPairDialog(pair),
-                                  ),
-                                  const SizedBox(width: 4),
-                                  IconButton(
-                                    visualDensity: VisualDensity.compact,
-                                    constraints: const BoxConstraints(),
-                                    padding: const EdgeInsets.all(4),
-                                    icon: Icon(
-                                      Icons.delete_outline_rounded,
-                                      color: putRed,
-                                      size: 16,
+                                  ],
+                                )
+                              else
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.end,
+                                  children: [
+                                    IconButton(
+                                      visualDensity: VisualDensity.compact,
+                                      constraints: const BoxConstraints(),
+                                      padding: const EdgeInsets.all(4),
+                                      icon: Icon(
+                                        Icons.edit_rounded,
+                                        color: accentCyan,
+                                        size: 16,
+                                      ),
+                                      tooltip: 'تعديل',
+                                      onPressed: () => _showEditPairDialog(pair),
                                     ),
-                                    tooltip: 'حذف',
-                                    onPressed: () => Supabase.instance.client
-                                        .from('pairs')
-                                        .delete()
-                                        .eq('id', pair['id'] as String),
-                                  ),
-                                ],
-                              ),
+                                    const SizedBox(width: 4),
+                                    IconButton(
+                                      visualDensity: VisualDensity.compact,
+                                      constraints: const BoxConstraints(),
+                                      padding: const EdgeInsets.all(4),
+                                      icon: Icon(
+                                        Icons.delete_outline_rounded,
+                                        color: putRed,
+                                        size: 16,
+                                      ),
+                                      tooltip: 'حذف',
+                                      onPressed: () => Supabase.instance.client
+                                          .from('pairs')
+                                          .delete()
+                                          .eq('id', pair['id'] as String),
+                                    ),
+                                  ],
+                                ),
                             ],
                           ),
                         );
@@ -1499,6 +1992,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                         _buildAppControlView(),
                         _buildSiteThemeView(),
                         _buildPromoView(),
+                        _buildOtcLibraryView(),
                       ],
                     ),
                   ),
@@ -1749,6 +2243,11 @@ class _AdminDashboardState extends State<AdminDashboard> {
             'العرض الترويجي / الإعلان',
             Icons.campaign_rounded,
           ),
+          _buildSidebarNavItem(
+            8,
+            'مكتبة أزواج OTC',
+            Icons.hub_rounded,
+          ),
           const Spacer(),
           Padding(
             padding: const EdgeInsets.all(20),
@@ -1814,6 +2313,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
             _buildMobileTabItem(5, 'تحكم'),
             _buildMobileTabItem(6, 'الثيم 🎨'),
             _buildMobileTabItem(7, 'إعلان'),
+            _buildMobileTabItem(8, 'OTC'),
           ],
         ),
       ),
