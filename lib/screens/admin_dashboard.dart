@@ -1147,6 +1147,37 @@ class _AdminDashboardState extends State<AdminDashboard> {
     );
   }
 
+  // Delete a pair from App Control. Must be awaited — the postgrest builder is
+  // lazy, so a fire-and-forget `.delete().eq()` never actually runs (that was the
+  // bug: clicking the trash did nothing). If it's a PO pair, also switch it off
+  // in the library so it isn't re-synced.
+  Future<void> _deletePair(Map<String, dynamic> pair) async {
+    final id = pair['id'] as String?;
+    if (id == null) return;
+    try {
+      await Supabase.instance.client.from('pairs').delete().eq('id', id);
+      if ((pair['source'] as String? ?? 'tv') == 'po') {
+        final cs = (pair['chart_symbol'] as String? ?? '').trim();
+        if (cs.isNotEmpty) {
+          await Supabase.instance.client
+              .from('otc_pairs')
+              .update({'enabled': false}).eq('symbol', cs);
+        }
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('تم حذف الزوج'), backgroundColor: callGreen),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('خطأ في الحذف: $e'), backgroundColor: putRed),
+        );
+      }
+    }
+  }
+
   Future<void> _setPairEnabled(Map<String, dynamic> pair, bool enabled) async {
     try {
       await Supabase.instance.client
@@ -1542,10 +1573,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                       icon: Icon(Icons.delete_outline_rounded,
                                           color: putRed, size: 15),
                                       tooltip: 'حذف',
-                                      onPressed: () => Supabase.instance.client
-                                          .from('pairs')
-                                          .delete()
-                                          .eq('id', pair['id'] as String),
+                                      onPressed: () => _deletePair(pair),
                                     ),
                                   ],
                                 ],
