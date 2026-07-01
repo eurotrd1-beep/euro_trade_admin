@@ -7018,6 +7018,84 @@ class _AdminDashboardState extends State<AdminDashboard> {
   final _stdStrategyCtrl = TextEditingController();
   final _vipStrategyCtrl = TextEditingController();
 
+  // Strip // line-comments and /* */ block-comments from a JSONC string so the
+  // admin can paste an annotated strategy. String literals are respected (a "//"
+  // inside a value is kept). `_note` keys are valid JSON and pass through.
+  String _stripJsonComments(String s) {
+    final sb = StringBuffer();
+    bool inStr = false, esc = false;
+    for (int i = 0; i < s.length; i++) {
+      final c = s[i];
+      if (inStr) {
+        sb.write(c);
+        if (esc) {
+          esc = false;
+        } else if (c == '\\') {
+          esc = true;
+        } else if (c == '"') {
+          inStr = false;
+        }
+        continue;
+      }
+      if (c == '"') {
+        inStr = true;
+        sb.write(c);
+        continue;
+      }
+      if (c == '/' && i + 1 < s.length && s[i + 1] == '/') {
+        i += 2;
+        while (i < s.length && s[i] != '\n') {
+          i++;
+        }
+        if (i < s.length) sb.write('\n');
+        continue;
+      }
+      if (c == '/' && i + 1 < s.length && s[i + 1] == '*') {
+        i += 2;
+        while (i + 1 < s.length && !(s[i] == '*' && s[i + 1] == '/')) {
+          i++;
+        }
+        i += 1; // land on the closing '/', the for-loop's i++ steps past it
+        continue;
+      }
+      sb.write(c);
+    }
+    // Remove trailing commas before } or ] (also outside strings).
+    final cleaned = sb.toString();
+    final out = StringBuffer();
+    bool s2 = false, e2 = false;
+    for (int i = 0; i < cleaned.length; i++) {
+      final c = cleaned[i];
+      if (s2) {
+        out.write(c);
+        if (e2) {
+          e2 = false;
+        } else if (c == '\\') {
+          e2 = true;
+        } else if (c == '"') {
+          s2 = false;
+        }
+        continue;
+      }
+      if (c == '"') {
+        s2 = true;
+        out.write(c);
+        continue;
+      }
+      if (c == ',') {
+        int j = i + 1;
+        while (j < cleaned.length && (cleaned[j] == ' ' || cleaned[j] == '\n' || cleaned[j] == '\r' || cleaned[j] == '\t')) {
+          j++;
+        }
+        if (j < cleaned.length && (cleaned[j] == '}' || cleaned[j] == ']')) {
+          continue; // drop the trailing comma
+        }
+      }
+      out.write(c);
+    }
+    return out.toString();
+  }
+
   Future<void> _uploadStrategy(String role) async {
     final ctrl = role == 'standard' ? _stdStrategyCtrl : _vipStrategyCtrl;
     final raw = ctrl.text.trim();
@@ -7031,7 +7109,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
       return;
     }
     try {
-      final Map<String, dynamic> json = jsonDecode(raw);
+      // Accept JSONC (with // and /* */ comments + trailing commas) → clean JSON.
+      final Map<String, dynamic> json = jsonDecode(_stripJsonComments(raw));
       final docId = role == 'standard' ? 'strategy_standard' : 'strategy_vip';
       await Supabase.instance.client.from('configs').upsert({
         'id': docId,
@@ -7084,6 +7163,11 @@ class _AdminDashboardState extends State<AdminDashboard> {
                 ),
               ),
             ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'مسموح تلصق JSON بتعليقات (// و /* */) وفواصل زائدة — بتتنضّف تلقائيًا قبل الحفظ. بتنطبق على كل الأوضاع (محاكاة + اسكراب).',
+            style: GoogleFonts.outfit(fontSize: 11, color: textSecondary),
           ),
           const SizedBox(height: 16),
 
