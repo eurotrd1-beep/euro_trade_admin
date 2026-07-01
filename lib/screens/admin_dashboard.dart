@@ -105,11 +105,13 @@ class _AdminDashboardState extends State<AdminDashboard> {
   bool _promoSaving = false;
 
 
+  // The 5 unified asset categories (shared by both sources + the user app).
   static const _pairCategories = [
-    ('forex', 'فوركس', Icons.currency_exchange_rounded),
-    ('crypto', 'كريبتو', Icons.currency_bitcoin_rounded),
-    ('metals', 'معادن', Icons.diamond_rounded),
+    ('currencies', 'عملات', Icons.currency_exchange_rounded),
     ('commodities', 'سلع', Icons.local_gas_station_rounded),
+    ('stocks', 'أسهم', Icons.business_rounded),
+    ('indices', 'مؤشرات', Icons.show_chart_rounded),
+    ('crypto', 'كريبتو', Icons.currency_bitcoin_rounded),
   ];
 
 
@@ -183,7 +185,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
   void _showAddPairDialog() {
     final symCtrl = TextEditingController();
     final chartSymCtrl = TextEditingController();
-    String selectedCategory = 'forex';
+    String selectedCategory = 'currencies';
 
     showDialog(
       context: context,
@@ -241,6 +243,9 @@ class _AdminDashboardState extends State<AdminDashboard> {
                     'chart_symbol': chartSym,
                     'category': selectedCategory,
                     'type': selectedCategory,
+                    'source': 'tv',       // manually-added → TradingView source
+                    'is_otc': false,
+                    'enabled': true,
                     'order': DateTime.now().millisecondsSinceEpoch,
                   });
                   if (mounted) {
@@ -281,7 +286,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
     final chartSymCtrl = TextEditingController(
       text: pair['chart_symbol'] as String? ?? '',
     );
-    String selectedCategory = pair['category'] as String? ?? 'forex';
+    String selectedCategory = _normCat(pair['category'] as String?);
 
     showDialog(
       context: context,
@@ -548,13 +553,13 @@ class _AdminDashboardState extends State<AdminDashboard> {
           .from('otc_pairs')
           .update({'subcategory': cat, 'updated_at': DateTime.now().toUtc().toIso8601String()})
           .eq('id', pair['id'] as String);
-      // Keep the synced trading-pair row's subtype in step (only if enabled).
+      // Keep the synced trading-pair row's category in step (only if enabled).
       if (pair['enabled'] == true) {
         await sb
             .from('pairs')
-            .update({'type': cat})
+            .update({'category': cat, 'type': cat})
             .eq('chart_symbol', pair['symbol'] as String? ?? '')
-            .eq('category', 'otc');
+            .eq('source', 'po');
       }
     } catch (e) {
       if (mounted) {
@@ -572,7 +577,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
     final sb = Supabase.instance.client;
     final symbol = (pair['symbol'] as String? ?? '').trim();
     final name = (pair['name'] as String? ?? '').trim();
-    final sub = (pair['subcategory'] as String? ?? 'forex');
+    final cat = _normCat(pair['subcategory'] as String?);
+    final isOtc = pair['is_otc'] == true;
     if (symbol.isEmpty) return;
     try {
       await sb
@@ -580,21 +586,21 @@ class _AdminDashboardState extends State<AdminDashboard> {
           .update({'enabled': enabled, 'updated_at': DateTime.now().toUtc().toIso8601String()})
           .eq('id', pair['id'] as String);
 
+      // Sync the unified trading pairs list. Pocket Option rows are identified by
+      // source='po'; remove any stale one first so we never create duplicates.
+      // chart_symbol carries NO ':' so the TradingView scraper ignores it.
+      await sb.from('pairs').delete().eq('chart_symbol', symbol).eq('source', 'po');
       if (enabled) {
-        // Auto-add to the trading pairs list. Remove any stale row first so we
-        // never create duplicates, then insert a fresh 'otc'-category row.
-        // chart_symbol carries NO ':' so the TradingView scraper ignores it.
-        await sb.from('pairs').delete().eq('chart_symbol', symbol).eq('category', 'otc');
         await sb.from('pairs').insert({
           'symbol': name.isNotEmpty ? name : symbol,
           'chart_symbol': symbol,
-          'category': 'otc',
-          'type': sub,
+          'category': cat,
+          'type': cat,
+          'source': 'po',
+          'is_otc': isOtc,
+          'enabled': true,
           'order': DateTime.now().millisecondsSinceEpoch,
         });
-      } else {
-        // Auto-remove from the trading pairs list.
-        await sb.from('pairs').delete().eq('chart_symbol', symbol).eq('category', 'otc');
       }
     } catch (e) {
       if (mounted) {
@@ -616,10 +622,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
           .from('otc_pairs')
           .update({'enabled': enabled, 'updated_at': DateTime.now().toUtc().toIso8601String()})
           .neq('symbol', '');
-      // Rebuild the synced trading pairs (category 'otc').
-      await sb.from('pairs').delete().eq('category', 'otc');
+      // Rebuild the synced Pocket Option pairs (source='po').
+      await sb.from('pairs').delete().eq('source', 'po');
       if (enabled) {
-        final lib = await sb.from('otc_pairs').select('symbol,name,subcategory');
+        final lib = await sb.from('otc_pairs').select('symbol,name,subcategory,is_otc');
         final list = (lib as List).cast<Map<String, dynamic>>();
         final now = DateTime.now().millisecondsSinceEpoch;
         final rows = <Map<String, dynamic>>[];
@@ -628,11 +634,15 @@ class _AdminDashboardState extends State<AdminDashboard> {
           final symbol = (p['symbol'] as String? ?? '').trim();
           if (symbol.isEmpty) continue;
           final name = (p['name'] as String? ?? '').trim();
+          final cat = _normCat(p['subcategory'] as String?);
           rows.add({
             'symbol': name.isNotEmpty ? name : symbol,
             'chart_symbol': symbol,
-            'category': 'otc',
-            'type': _normCat(p['subcategory'] as String?),
+            'category': cat,
+            'type': cat,
+            'source': 'po',
+            'is_otc': p['is_otc'] == true,
+            'enabled': true,
             'order': now + i,
           });
         }
@@ -1137,13 +1147,28 @@ class _AdminDashboardState extends State<AdminDashboard> {
     );
   }
 
+  Future<void> _setPairEnabled(Map<String, dynamic> pair, bool enabled) async {
+    try {
+      await Supabase.instance.client
+          .from('pairs')
+          .update({'enabled': enabled})
+          .eq('id', pair['id'] as String);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('خطأ: $e'), backgroundColor: putRed),
+        );
+      }
+    }
+  }
+
   Widget _buildPairsSection() {
     const catLabels = {
-      'forex': 'فوركس',
-      'metals': 'معادن',
+      'currencies': 'عملات',
       'commodities': 'سلع',
+      'stocks': 'أسهم',
+      'indices': 'مؤشرات',
       'crypto': 'كريبتو',
-      'otc': 'OTC',
     };
     return StreamBuilder<List<Map<String, dynamic>>>(
       stream: Supabase.instance.client
@@ -1159,7 +1184,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
         final q = _pairsSearchQuery.toLowerCase();
         final pairs = allPairs.where((p) {
           if (_pairsCategoryFilter != 'all' &&
-              p['category'] != _pairsCategoryFilter) {
+              _normCat(p['category'] as String?) != _pairsCategoryFilter) {
             return false;
           }
           if (q.isEmpty) return true;
@@ -1317,11 +1342,11 @@ class _AdminDashboardState extends State<AdminDashboard> {
                     children: [
                       for (final (id, label) in const [
                         ('all', 'الكل'),
-                        ('forex', 'فوركس'),
-                        ('metals', 'معادن'),
+                        ('currencies', 'عملات'),
                         ('commodities', 'سلع'),
+                        ('stocks', 'أسهم'),
+                        ('indices', 'مؤشرات'),
                         ('crypto', 'كريبتو'),
-                        ('otc', 'OTC'),
                       ])
                         Padding(
                           padding: const EdgeInsets.only(left: 8),
@@ -1386,9 +1411,13 @@ class _AdminDashboardState extends State<AdminDashboard> {
                       itemCount: pairs.length,
                       itemBuilder: (context, i) {
                         final pair = pairs[i];
-                        final cat = pair['category'] as String? ?? '';
+                        final cat = _normCat(pair['category'] as String?);
+                        final source = pair['source'] as String? ?? 'tv';
+                        final isPo = source == 'po';
+                        final isOtc = pair['is_otc'] == true;
+                        final isEnabled = pair['enabled'] != false;
                         return Container(
-                          width: 170,
+                          width: 178,
                           margin: const EdgeInsets.only(left: 10),
                           padding: const EdgeInsets.fromLTRB(12, 10, 8, 8),
                           decoration: BoxDecoration(
@@ -1399,23 +1428,53 @@ class _AdminDashboardState extends State<AdminDashboard> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
-                                  vertical: 3,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: accentCyan.withAlpha(25),
-                                  borderRadius: BorderRadius.circular(6),
-                                ),
-                                child: Text(
-                                  catLabels[cat] ?? cat,
-                                  style: GoogleFonts.outfit(
-                                    color: accentCyan,
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.w600,
+                              Row(
+                                children: [
+                                  Text(
+                                    isPo ? '🎯' : '📺',
+                                    style: const TextStyle(fontSize: 13),
                                   ),
-                                ),
+                                  const SizedBox(width: 6),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 7,
+                                      vertical: 3,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: accentCyan.withAlpha(25),
+                                      borderRadius: BorderRadius.circular(6),
+                                    ),
+                                    child: Text(
+                                      catLabels[cat] ?? cat,
+                                      style: GoogleFonts.outfit(
+                                        color: accentCyan,
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ),
+                                  if (isOtc) ...[
+                                    const SizedBox(width: 4),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 5,
+                                        vertical: 3,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: callGreen.withAlpha(25),
+                                        borderRadius: BorderRadius.circular(6),
+                                      ),
+                                      child: Text(
+                                        'OTC',
+                                        style: GoogleFonts.outfit(
+                                          color: callGreen,
+                                          fontSize: 8,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ],
                               ),
                               const SizedBox(height: 8),
                               Text(
@@ -1439,55 +1498,49 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                 ),
                               ),
                               const Spacer(),
-                              // OTC pairs are managed exclusively from the OTC
-                              // library (toggle there) — no manual edit/delete
-                              // here, to keep both lists in sync.
-                              if (cat == 'otc')
-                                Row(
-                                  mainAxisAlignment: MainAxisAlignment.end,
-                                  children: [
-                                    Icon(Icons.lock_rounded,
-                                        color: textSecondary, size: 12),
-                                    const SizedBox(width: 4),
-                                    Flexible(
-                                      child: Text(
-                                        'يُدار من مكتبة OTC',
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: GoogleFonts.outfit(
-                                          color: textSecondary,
-                                          fontSize: 9,
-                                        ),
-                                      ),
+                              // Enable/disable applies to EVERY pair (both
+                              // sources). PO pairs are added/removed from the
+                              // library, so here they only get the visibility
+                              // toggle; TV pairs also get edit/delete.
+                              Row(
+                                children: [
+                                  Transform.scale(
+                                    scale: 0.7,
+                                    child: Switch(
+                                      value: isEnabled,
+                                      activeColor: callGreen,
+                                      materialTapTargetSize:
+                                          MaterialTapTargetSize.shrinkWrap,
+                                      onChanged: (v) => _setPairEnabled(pair, v),
                                     ),
-                                  ],
-                                )
-                              else
-                                Row(
-                                  mainAxisAlignment: MainAxisAlignment.end,
-                                  children: [
+                                  ),
+                                  Text(
+                                    isEnabled ? 'ظاهر' : 'مخفي',
+                                    style: GoogleFonts.outfit(
+                                      color: isEnabled ? callGreen : textSecondary,
+                                      fontSize: 9,
+                                    ),
+                                  ),
+                                  const Spacer(),
+                                  if (isPo)
+                                    Icon(Icons.lock_rounded,
+                                        color: textSecondary, size: 13)
+                                  else ...[
                                     IconButton(
                                       visualDensity: VisualDensity.compact,
                                       constraints: const BoxConstraints(),
-                                      padding: const EdgeInsets.all(4),
-                                      icon: Icon(
-                                        Icons.edit_rounded,
-                                        color: accentCyan,
-                                        size: 16,
-                                      ),
+                                      padding: const EdgeInsets.all(3),
+                                      icon: Icon(Icons.edit_rounded,
+                                          color: accentCyan, size: 15),
                                       tooltip: 'تعديل',
                                       onPressed: () => _showEditPairDialog(pair),
                                     ),
-                                    const SizedBox(width: 4),
                                     IconButton(
                                       visualDensity: VisualDensity.compact,
                                       constraints: const BoxConstraints(),
-                                      padding: const EdgeInsets.all(4),
-                                      icon: Icon(
-                                        Icons.delete_outline_rounded,
-                                        color: putRed,
-                                        size: 16,
-                                      ),
+                                      padding: const EdgeInsets.all(3),
+                                      icon: Icon(Icons.delete_outline_rounded,
+                                          color: putRed, size: 15),
                                       tooltip: 'حذف',
                                       onPressed: () => Supabase.instance.client
                                           .from('pairs')
@@ -1495,7 +1548,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                           .eq('id', pair['id'] as String),
                                     ),
                                   ],
-                                ),
+                                ],
+                              ),
                             ],
                           ),
                         );
@@ -5524,6 +5578,121 @@ class _AdminDashboardState extends State<AdminDashboard> {
     }
   }
 
+  // Persist a simple config value (id → {value}) — the user app reads these
+  // live via Supabase realtime, so changes apply instantly with no redeploy.
+  Future<void> _setConfig(String id, String value) async {
+    try {
+      await Supabase.instance.client.from('configs').upsert({
+        'id': id,
+        'data': {'value': value, 'updatedAt': DateTime.now().toUtc().toIso8601String()},
+      });
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('خطأ: $e'), backgroundColor: putRed),
+        );
+      }
+    }
+  }
+
+  Widget _sysChoice(String label, bool sel, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        margin: const EdgeInsets.only(left: 8, bottom: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+        decoration: BoxDecoration(
+          color: sel ? accentCyan.withValues(alpha: 0.16) : spaceBackground,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: sel ? accentCyan : borderGlow, width: sel ? 1.5 : 1),
+        ),
+        child: Text(
+          label,
+          style: GoogleFonts.outfit(
+            color: sel ? accentCyan : textSecondary,
+            fontSize: 12.5,
+            fontWeight: sel ? FontWeight.w700 : FontWeight.w500,
+          ),
+        ),
+      ),
+    );
+  }
+
+  // System settings: price source (simulator vs scraping) and, for scraping,
+  // which source's pairs the user sees (tv / po / all).
+  Widget _buildSystemSettingsSection() {
+    return StreamBuilder<List<Map<String, dynamic>>>(
+      stream: Supabase.instance.client.from('configs').stream(primaryKey: ['id']),
+      builder: (context, snap) {
+        final rows = snap.data ?? [];
+        String priceSystem = 'scraping';
+        String displaySource = 'all';
+        for (final r in rows) {
+          final d = r['data'];
+          final v = (d is Map) ? d['value'] as String? : null;
+          if (r['id'] == 'price_system' && v != null) priceSystem = v;
+          if (r['id'] == 'display_source' && v != null) displaySource = v;
+        }
+        final scraping = priceSystem == 'scraping';
+        return Container(
+          decoration: BoxDecoration(
+            color: cardBgColor,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: borderGlow),
+          ),
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.settings_suggest_rounded, color: accentCyan, size: 20),
+                  const SizedBox(width: 10),
+                  Text(
+                    'إعدادات النظام',
+                    style: GoogleFonts.outfit(
+                      color: textPrimary, fontWeight: FontWeight.bold, fontSize: 14),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text('نظام الأسعار',
+                  style: GoogleFonts.outfit(color: textSecondary, fontSize: 12)),
+              const SizedBox(height: 8),
+              Wrap(children: [
+                _sysChoice('🔄 محاكاة (Simulator)', priceSystem == 'simulator',
+                    () => _setConfig('price_system', 'simulator')),
+                _sysChoice('📡 اسكراب (Scraping)', scraping,
+                    () => _setConfig('price_system', 'scraping')),
+              ]),
+              if (scraping) ...[
+                const SizedBox(height: 8),
+                Text('الأزواج اللي تظهر للمستخدم',
+                    style: GoogleFonts.outfit(color: textSecondary, fontSize: 12)),
+                const SizedBox(height: 8),
+                Wrap(children: [
+                  _sysChoice('📺 TradingView فقط', displaySource == 'tv',
+                      () => _setConfig('display_source', 'tv')),
+                  _sysChoice('🎯 Pocket Option فقط', displaySource == 'po',
+                      () => _setConfig('display_source', 'po')),
+                  _sysChoice('🌐 الكل', displaySource == 'all',
+                      () => _setConfig('display_source', 'all')),
+                ]),
+              ],
+              const SizedBox(height: 4),
+              Text(
+                scraping
+                    ? 'الإعداد بيتطبّق فورًا على كل المستخدمين (realtime) بدون إعادة نشر.'
+                    : 'الشارت هيولّد بيانات محاكاة تلقائيًا لكل الأزواج.',
+                style: GoogleFonts.outfit(color: textSecondary, fontSize: 10),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   // ══════════════════════════════════════════════════════════════════
   // VIEW 7 — APP CONTROL (Maintenance + User Bans overview)
   // ══════════════════════════════════════════════════════════════════
@@ -5541,6 +5710,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
               color: textPrimary,
             ),
           ),
+          const SizedBox(height: 16),
+
+          // ── System Settings (price source) ────────────────────────
+          _buildSystemSettingsSection(),
           const SizedBox(height: 16),
 
           // ── Pairs Management ──────────────────────────────────────
