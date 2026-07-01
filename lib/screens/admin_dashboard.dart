@@ -5648,6 +5648,115 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
   // System settings: price source (simulator vs scraping) and, for scraping,
   // which source's pairs the user sees (tv / po / all).
+  String _timeAgoAr(DateTime? t) {
+    if (t == null) return 'لا يوجد';
+    final d = DateTime.now().difference(t);
+    if (d.inMinutes < 1) return 'منذ لحظات';
+    if (d.inMinutes < 60) return 'منذ ${d.inMinutes} دقيقة';
+    if (d.inHours < 24) return 'منذ ${d.inHours} ساعة';
+    return 'منذ ${d.inDays} يوم';
+  }
+
+  Widget _captchaStatRow(String emoji, String label, String value, Color color) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        children: [
+          Text(emoji, style: const TextStyle(fontSize: 15)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(label,
+                style: GoogleFonts.outfit(color: textSecondary, fontSize: 12.5)),
+          ),
+          Text(value,
+              style: GoogleFonts.outfit(
+                  color: color, fontSize: 13.5, fontWeight: FontWeight.bold)),
+        ],
+      ),
+    );
+  }
+
+  // 2captcha statistics: solves count, last solve, remaining balance, total cost.
+  Widget _buildCaptchaStatsSection() {
+    return StreamBuilder<List<Map<String, dynamic>>>(
+      stream: Supabase.instance.client.from('captcha_stats').stream(primaryKey: ['id']),
+      builder: (context, snap) {
+        final rows = snap.data ?? [];
+        final count = rows.length;
+        final cost = count * 0.001;
+        DateTime? last;
+        for (final r in rows) {
+          final t = DateTime.tryParse(r['ts']?.toString() ?? '');
+          if (t != null && (last == null || t.isAfter(last!))) last = t;
+        }
+        return StreamBuilder<List<Map<String, dynamic>>>(
+          stream: Supabase.instance.client
+              .from('configs')
+              .stream(primaryKey: ['id'])
+              .eq('id', 'captcha_balance'),
+          builder: (context, bsnap) {
+            double? balance;
+            if (bsnap.hasData && bsnap.data!.isNotEmpty) {
+              final d = bsnap.data!.first['data'];
+              if (d is Map) balance = (d['balance'] as num?)?.toDouble();
+            }
+            final lowBal = balance != null && balance! < 1.0;
+            return Container(
+              decoration: BoxDecoration(
+                color: cardBgColor,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: lowBal ? putRed : borderGlow),
+              ),
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.verified_user_rounded, color: accentCyan, size: 20),
+                      const SizedBox(width: 10),
+                      Text('إحصائيات 2captcha',
+                          style: GoogleFonts.outfit(
+                              color: textPrimary,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 14)),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  _captchaStatRow('💰', 'الرصيد المتبقي',
+                      balance == null ? '—' : '\$${balance!.toStringAsFixed(2)}',
+                      lowBal ? putRed : callGreen),
+                  _captchaStatRow('🔢', 'عدد الحلول', '$count مرة', textPrimary),
+                  _captchaStatRow('💸', 'إجمالي التكلفة',
+                      '\$${cost.toStringAsFixed(3)}', textPrimary),
+                  _captchaStatRow('📅', 'آخر حل', _timeAgoAr(last), textSecondary),
+                  if (lowBal) ...[
+                    const SizedBox(height: 8),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: putRed.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: putRed.withValues(alpha: 0.4)),
+                      ),
+                      child: Text('⚠️ الرصيد منخفض — اشحن 2captcha قبل ما يخلص',
+                          textAlign: TextAlign.center,
+                          style: GoogleFonts.outfit(
+                              color: putRed,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700)),
+                    ),
+                  ],
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   Widget _buildSystemSettingsSection() {
     return StreamBuilder<List<Map<String, dynamic>>>(
       stream: Supabase.instance.client.from('configs').stream(primaryKey: ['id']),
@@ -5742,6 +5851,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
           // ── System Settings (price source) ────────────────────────
           _buildSystemSettingsSection(),
+          const SizedBox(height: 16),
+
+          // ── 2captcha statistics ───────────────────────────────────
+          _buildCaptchaStatsSection(),
           const SizedBox(height: 16),
 
           // ── Pairs Management ──────────────────────────────────────
