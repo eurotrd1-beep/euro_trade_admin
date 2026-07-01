@@ -39,6 +39,9 @@ class _AdminDashboardState extends State<AdminDashboard> {
   String _otcSearchQuery = '';
   final _otcSearchCtrl = TextEditingController();
   bool _otcScanRequesting = false;
+  String _otcCatFilter = 'all';   // all | currencies | commodities | stocks | indices | crypto
+  String _otcTypeFilter = 'all';  // all | otc | real
+  bool _otcBulkBusy = false;      // enable-all / disable-all in progress
   String _selectedPlatformFilter =
       'all'; // 'all', 'Quotex', 'Pocket Option', 'Expert Option'
   String _selectedRoleFilter = 'all'; // 'all', 'vip', 'standard'
@@ -461,12 +464,32 @@ class _AdminDashboardState extends State<AdminDashboard> {
   // pair can be classified + enabled. Enabling a pair auto-adds it to the
   // trading pairs list (category 'otc') shown in App Control + the user app.
   // ══════════════════════════════════════════════════════════════════
+  // The 5 asset categories the app groups by (auto-detected by the scraper).
   static const Map<String, String> _otcCatLabels = {
-    'forex': 'فوركس',
-    'metals': 'معادن',
+    'currencies': 'عملات',
     'commodities': 'سلع',
+    'stocks': 'أسهم',
+    'indices': 'مؤشرات',
     'crypto': 'كريبتو',
   };
+
+  // Normalize any legacy category value onto the current 5-category taxonomy.
+  static String _normCat(String? c) {
+    switch (c) {
+      case 'forex':
+        return 'currencies';
+      case 'metals':
+        return 'commodities';
+      case 'currencies':
+      case 'commodities':
+      case 'stocks':
+      case 'indices':
+      case 'crypto':
+        return c!;
+      default:
+        return 'currencies';
+    }
+  }
 
   Future<void> _requestOtcScan() async {
     setState(() => _otcScanRequesting = true);
@@ -582,6 +605,95 @@ class _AdminDashboardState extends State<AdminDashboard> {
     }
   }
 
+  // Enable or disable EVERY pair in the library in one shot, and rebuild the
+  // trading `pairs` list to match — so the user sees them all (or none) at once.
+  Future<void> _setAllOtcEnabled(bool enabled) async {
+    final sb = Supabase.instance.client;
+    setState(() => _otcBulkBusy = true);
+    try {
+      // Flip every library row (non-empty symbol matches all rows).
+      await sb
+          .from('otc_pairs')
+          .update({'enabled': enabled, 'updated_at': DateTime.now().toUtc().toIso8601String()})
+          .neq('symbol', '');
+      // Rebuild the synced trading pairs (category 'otc').
+      await sb.from('pairs').delete().eq('category', 'otc');
+      if (enabled) {
+        final lib = await sb.from('otc_pairs').select('symbol,name,subcategory');
+        final list = (lib as List).cast<Map<String, dynamic>>();
+        final now = DateTime.now().millisecondsSinceEpoch;
+        final rows = <Map<String, dynamic>>[];
+        for (var i = 0; i < list.length; i++) {
+          final p = list[i];
+          final symbol = (p['symbol'] as String? ?? '').trim();
+          if (symbol.isEmpty) continue;
+          final name = (p['name'] as String? ?? '').trim();
+          rows.add({
+            'symbol': name.isNotEmpty ? name : symbol,
+            'chart_symbol': symbol,
+            'category': 'otc',
+            'type': _normCat(p['subcategory'] as String?),
+            'order': now + i,
+          });
+        }
+        for (var i = 0; i < rows.length; i += 200) {
+          final end = (i + 200 < rows.length) ? i + 200 : rows.length;
+          await sb.from('pairs').insert(rows.sublist(i, end));
+        }
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              enabled ? 'تم تفعيل كل الأزواج — هتظهر كلها عند المستخدم' : 'تم تعطيل كل الأزواج',
+              style: GoogleFonts.outfit(),
+            ),
+            backgroundColor: enabled ? callGreen : putRed,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('خطأ: $e'), backgroundColor: putRed),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _otcBulkBusy = false);
+    }
+  }
+
+  Future<void> _confirmSetAllOtc(bool enabled, int count) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: cardBgColor,
+        title: Text(
+          enabled ? 'تفعيل كل الأزواج؟' : 'تعطيل كل الأزواج؟',
+          style: GoogleFonts.outfit(color: textPrimary, fontWeight: FontWeight.bold),
+        ),
+        content: Text(
+          enabled
+              ? 'هيتفعّل $count زوج ويظهروا كلهم عند المستخدم. ملاحظة: تفعيل عدد كبير بيزوّد الحِمل على السيرفر.'
+              : 'هيتعطّل كل الأزواج ويختفوا من عند المستخدم.',
+          style: GoogleFonts.outfit(color: textSecondary, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text('إلغاء', style: GoogleFonts.outfit(color: textSecondary)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: enabled ? callGreen : putRed),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(enabled ? 'تفعيل الكل' : 'تعطيل الكل', style: GoogleFonts.outfit(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) await _setAllOtcEnabled(enabled);
+  }
+
   Widget _buildOtcLibraryView() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
@@ -589,7 +701,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(
-            'مكتبة أزواج OTC',
+            'مكتبة الأزواج',
             style: GoogleFonts.outfit(
               fontSize: 16,
               fontWeight: FontWeight.bold,
@@ -598,7 +710,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
           ),
           const SizedBox(height: 4),
           Text(
-            'المصدر الوحيد لأزواج OTC — فعّل الزوج عشان يظهر تلقائيًا في أزواج التداول وعند المستخدم.',
+            'كل أصول Pocket Option (عملات · سلع · أسهم · مؤشرات · كريبتو — OTC وعادي). '
+            'فعّل الزوج عشان يظهر تلقائيًا في أزواج التداول وعند المستخدم.',
             style: GoogleFonts.outfit(fontSize: 12, color: textSecondary),
           ),
           const SizedBox(height: 14),
@@ -739,6 +852,11 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
         final q = _otcSearchQuery.toLowerCase();
         final pairs = all.where((p) {
+          if (_otcCatFilter != 'all' &&
+              _normCat(p['subcategory'] as String?) != _otcCatFilter) return false;
+          final isOtc = p['is_otc'] == true;
+          if (_otcTypeFilter == 'otc' && !isOtc) return false;
+          if (_otcTypeFilter == 'real' && isOtc) return false;
           if (q.isEmpty) return true;
           final n = (p['name'] as String? ?? '').toLowerCase();
           final s = (p['symbol'] as String? ?? '').toLowerCase();
@@ -788,14 +906,33 @@ class _AdminDashboardState extends State<AdminDashboard> {
                 ),
               ),
               const Divider(height: 1, color: Color(0xFF1F2937)),
+              // Bulk enable/disable — turn the whole library on or off in one tap.
               if (all.isNotEmpty)
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 2),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: _otcBulkBtn('تفعيل الكل', Icons.done_all_rounded, callGreen,
+                            _otcBulkBusy ? null : () => _confirmSetAllOtc(true, all.length)),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _otcBulkBtn('تعطيل الكل', Icons.block_rounded, putRed,
+                            _otcBulkBusy ? null : () => _confirmSetAllOtc(false, all.length)),
+                      ),
+                    ],
+                  ),
+                ),
+              if (all.isNotEmpty) _buildOtcFilters(),
+              if (all.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
                   child: TextField(
                     controller: _otcSearchCtrl,
                     style: GoogleFonts.outfit(color: textPrimary, fontSize: 13),
                     decoration: InputDecoration(
-                      hintText: 'ابحث عن زوج OTC...',
+                      hintText: 'ابحث بالاسم أو الرمز...',
                       hintStyle: GoogleFonts.outfit(color: textSecondary, fontSize: 12),
                       prefixIcon: Icon(Icons.search_rounded, color: textSecondary, size: 18),
                       filled: true,
@@ -848,10 +985,73 @@ class _AdminDashboardState extends State<AdminDashboard> {
     );
   }
 
+  Widget _otcBulkBtn(String label, IconData icon, Color color, VoidCallback? onTap) {
+    return OutlinedButton.icon(
+      onPressed: onTap,
+      icon: _otcBulkBusy
+          ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+          : Icon(icon, size: 16, color: color),
+      label: Text(
+        label,
+        style: GoogleFonts.outfit(color: color, fontSize: 12, fontWeight: FontWeight.w600),
+      ),
+      style: OutlinedButton.styleFrom(
+        side: BorderSide(color: color.withValues(alpha: 0.5)),
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      ),
+    );
+  }
+
+  Widget _buildOtcFilters() {
+    Widget chip(String label, bool sel, VoidCallback onTap) {
+      return GestureDetector(
+        onTap: onTap,
+        child: Container(
+          margin: const EdgeInsets.only(right: 6, bottom: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color: sel ? accentCyan.withValues(alpha: 0.18) : spaceBackground,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: sel ? accentCyan : borderGlow),
+          ),
+          child: Text(
+            label,
+            style: GoogleFonts.outfit(
+              color: sel ? accentCyan : textSecondary,
+              fontSize: 11,
+              fontWeight: sel ? FontWeight.w600 : FontWeight.normal,
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(children: [
+            chip('كل التصنيفات', _otcCatFilter == 'all', () => setState(() => _otcCatFilter = 'all')),
+            ..._otcCatLabels.entries.map((e) =>
+                chip(e.value, _otcCatFilter == e.key, () => setState(() => _otcCatFilter = e.key))),
+          ]),
+          Wrap(children: [
+            chip('OTC + عادي', _otcTypeFilter == 'all', () => setState(() => _otcTypeFilter = 'all')),
+            chip('OTC فقط', _otcTypeFilter == 'otc', () => setState(() => _otcTypeFilter = 'otc')),
+            chip('عادي فقط', _otcTypeFilter == 'real', () => setState(() => _otcTypeFilter = 'real')),
+          ]),
+        ],
+      ),
+    );
+  }
+
   Widget _buildOtcPairRow(Map<String, dynamic> pair) {
     final name = pair['name'] as String? ?? '';
     final symbol = pair['symbol'] as String? ?? '';
-    final sub = pair['subcategory'] as String? ?? 'forex';
+    final sub = _normCat(pair['subcategory'] as String?);
+    final isOtc = pair['is_otc'] == true;
     final enabled = pair['enabled'] == true;
 
     return Padding(
@@ -870,12 +1070,32 @@ class _AdminDashboardState extends State<AdminDashboard> {
                     fontSize: 13,
                   ),
                 ),
-                Text(
-                  symbol,
-                  style: GoogleFonts.robotoMono(
-                    color: textSecondary,
-                    fontSize: 10,
-                  ),
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        symbol,
+                        overflow: TextOverflow.ellipsis,
+                        style: GoogleFonts.robotoMono(color: textSecondary, fontSize: 10),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: (isOtc ? accentCyan : callGreen).withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        isOtc ? 'OTC' : 'عادي',
+                        style: GoogleFonts.outfit(
+                          color: isOtc ? accentCyan : callGreen,
+                          fontSize: 8,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -890,7 +1110,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
             ),
             child: DropdownButtonHideUnderline(
               child: DropdownButton<String>(
-                value: _otcCatLabels.containsKey(sub) ? sub : 'forex',
+                value: _otcCatLabels.containsKey(sub) ? sub : 'currencies',
                 isDense: true,
                 dropdownColor: cardBgColor,
                 style: GoogleFonts.outfit(color: textPrimary, fontSize: 12),
