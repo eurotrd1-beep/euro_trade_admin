@@ -6324,6 +6324,100 @@ class _AdminDashboardState extends State<AdminDashboard> {
     await _savePromo();
   }
 
+  // Persist the enable/disable toggle IMMEDIATELY (no need to press Save), so
+  // turning the ad off actually stops it showing to users right away. Only the
+  // `enabled` flag is patched — the rest of the promo content is preserved.
+  Future<void> _setPromoEnabled(bool v) async {
+    setState(() => _promoEnabled = v);
+    try {
+      final row = await Supabase.instance.client
+          .from('configs')
+          .select('data')
+          .eq('id', 'promo')
+          .maybeSingle();
+      final data = Map<String, dynamic>.from((row?['data'] as Map?) ?? {});
+      data['enabled'] = v;
+      await Supabase.instance.client
+          .from('configs')
+          .upsert({'id': 'promo', 'data': data});
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(v
+                ? 'تم تفعيل الإعلان ✅'
+                : 'تم إيقاف الإعلان — لن يظهر للمستخدمين'),
+            backgroundColor: v ? callGreen : putRed,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('خطأ: $e'), backgroundColor: putRed),
+        );
+      }
+    }
+  }
+
+  // Reset the promo impression + click counters back to zero.
+  Future<void> _resetPromoStats() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          backgroundColor: const Color(0xFF12102A),
+          title: Text('تصفير الإحصائيات',
+              style: GoogleFonts.outfit(
+                  color: textPrimary, fontWeight: FontWeight.bold)),
+          content: Text('هل تريد تصفير عدد المشاهدات والضغطات إلى صفر؟',
+              style: GoogleFonts.outfit(color: textSecondary)),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text('إلغاء',
+                  style: GoogleFonts.outfit(color: textSecondary)),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: ElevatedButton.styleFrom(backgroundColor: putRed),
+              child: const Text('تصفير'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (confirm != true) return;
+    try {
+      final row = await Supabase.instance.client
+          .from('clicks')
+          .select('data')
+          .eq('id', 'promo')
+          .maybeSingle();
+      final data = Map<String, dynamic>.from((row?['data'] as Map?) ?? {});
+      data['views'] = 0;
+      data['cta'] = 0;
+      await Supabase.instance.client
+          .from('clicks')
+          .upsert({'id': 'promo', 'data': data});
+      if (mounted) {
+        setState(() {}); // re-run the stats FutureBuilder
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('تم تصفير المشاهدات والضغطات ✅'),
+            backgroundColor: callGreen,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('خطأ: $e'), backgroundColor: putRed),
+        );
+      }
+    }
+  }
+
   String _formatStoredEndsAt(String iso) {
     try {
       final dt = DateTime.parse(iso).toLocal();
@@ -6398,6 +6492,24 @@ class _AdminDashboardState extends State<AdminDashboard> {
               );
             },
           ),
+          const SizedBox(height: 10),
+          // Reset impressions + clicks
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: _resetPromoStats,
+              icon: const Icon(Icons.restart_alt_rounded, size: 18),
+              label: const Text('تصفير المشاهدات والضغطات'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: putRed,
+                side: BorderSide(color: putRed.withAlpha(140)),
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+            ),
+          ),
           const SizedBox(height: 16),
           Container(
             padding: const EdgeInsets.all(16),
@@ -6460,7 +6572,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                       Switch(
                         value: _promoEnabled,
                         activeColor: callGreen,
-                        onChanged: (v) => setState(() => _promoEnabled = v),
+                        onChanged: _setPromoEnabled,
                       ),
                     ],
                   ),
