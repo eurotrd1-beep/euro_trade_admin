@@ -1848,6 +1848,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
     _promoTargetIdCtrl.dispose();
     _stdStrategyCtrl.dispose();
     _vipStrategyCtrl.dispose();
+    _monStdStrategyCtrl.dispose();
+    _monVipStrategyCtrl.dispose();
     _pairsSearchCtrl.dispose();
     super.dispose();
   }
@@ -6876,6 +6878,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
   final _stdStrategyCtrl = TextEditingController();
   final _vipStrategyCtrl = TextEditingController();
+  final _monStdStrategyCtrl = TextEditingController();
+  final _monVipStrategyCtrl = TextEditingController();
 
   // Strip // line-comments and /* */ block-comments from a JSONC string so the
   // admin can paste an annotated strategy. String literals are respected (a "//"
@@ -6955,8 +6959,27 @@ class _AdminDashboardState extends State<AdminDashboard> {
     return out.toString();
   }
 
+  // Four independent strategy slots, each stored under its own config id.
+  static const Map<String, String> _strategyDocIds = {
+    'standard': 'strategy_standard',
+    'vip': 'strategy_vip',
+    'monitoring_standard': 'monitoring_standard',
+    'monitoring_vip': 'monitoring_vip',
+  };
+  static const Map<String, String> _strategyLabels = {
+    'standard': 'الإشارة Standard',
+    'vip': 'الإشارة VIP',
+    'monitoring_standard': 'المراقبة Standard',
+    'monitoring_vip': 'المراقبة VIP',
+  };
+
   Future<void> _uploadStrategy(String role) async {
-    final ctrl = role == 'standard' ? _stdStrategyCtrl : _vipStrategyCtrl;
+    final ctrl = {
+      'standard': _stdStrategyCtrl,
+      'vip': _vipStrategyCtrl,
+      'monitoring_standard': _monStdStrategyCtrl,
+      'monitoring_vip': _monVipStrategyCtrl,
+    }[role]!;
     final raw = ctrl.text.trim();
     if (raw.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -6970,7 +6993,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
     try {
       // Accept JSONC (with // and /* */ comments + trailing commas) → clean JSON.
       final Map<String, dynamic> json = jsonDecode(_stripJsonComments(raw));
-      final docId = role == 'standard' ? 'strategy_standard' : 'strategy_vip';
+      final docId = _strategyDocIds[role]!;
       await Supabase.instance.client.from('configs').upsert({
         'id': docId,
         'data': json,
@@ -6979,7 +7002,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              '✅ تم رفع استراتيجية ${role == "standard" ? "Standard" : "VIP"} بنجاح',
+              '✅ تم رفع استراتيجية ${_strategyLabels[role]} بنجاح',
             ),
             backgroundColor: callGreen,
           ),
@@ -6996,6 +7019,69 @@ class _AdminDashboardState extends State<AdminDashboard> {
         );
       }
     }
+  }
+
+  // One strategy slot: label + JSON field + upload button (JSONC accepted).
+  Widget _strategySlot({
+    required String title,
+    required TextEditingController controller,
+    required String role,
+    required Color accent,
+    required IconData buttonIcon,
+    required Color buttonBg,
+    required Color buttonFg,
+    required String buttonText,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          title,
+          style: GoogleFonts.outfit(
+            fontSize: 13,
+            color: accent,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 8),
+        TextField(
+          controller: controller,
+          maxLines: 6,
+          style: GoogleFonts.outfit(fontSize: 11, color: textPrimary),
+          decoration: InputDecoration(
+            hintText: 'الصق محتوى ملف JSON هنا...',
+            hintStyle: GoogleFonts.outfit(color: textSecondary, fontSize: 11),
+            filled: true,
+            fillColor: spaceBackground,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: const BorderSide(color: borderGlow),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: const BorderSide(color: borderGlow),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: BorderSide(color: accent),
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        ElevatedButton.icon(
+          onPressed: () => _uploadStrategy(role),
+          icon: Icon(buttonIcon, size: 16),
+          label: Text(buttonText),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: buttonBg,
+            foregroundColor: buttonFg,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+            ),
+          ),
+        ),
+      ],
+    );
   }
 
   Widget _buildStrategyUploadSection() {
@@ -7030,100 +7116,87 @@ class _AdminDashboardState extends State<AdminDashboard> {
           ),
           const SizedBox(height: 16),
 
-          // Standard
-          Text(
-            'استراتيجية Standard',
-            style: GoogleFonts.outfit(
-              fontSize: 13,
-              color: textPrimary,
-              fontWeight: FontWeight.w600,
-            ),
+          // ── Instant signal strategies ──────────────────────────────────
+          Row(
+            children: [
+              const Icon(Icons.bolt_rounded, color: accentCyan, size: 15),
+              const SizedBox(width: 6),
+              Text(
+                'الإشارة الفورية',
+                style: GoogleFonts.outfit(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  color: accentCyan,
+                ),
+              ),
+            ],
           ),
-          const SizedBox(height: 8),
-          TextField(
+          const SizedBox(height: 10),
+          _strategySlot(
+            title: 'استراتيجية Standard',
             controller: _stdStrategyCtrl,
-            maxLines: 6,
-            style: GoogleFonts.outfit(fontSize: 11, color: textPrimary),
-            decoration: InputDecoration(
-              hintText: 'الصق محتوى ملف JSON للاستراتيجية هنا...',
-              hintStyle: GoogleFonts.outfit(color: textSecondary, fontSize: 11),
-              filled: true,
-              fillColor: spaceBackground,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(8),
-                borderSide: const BorderSide(color: borderGlow),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(8),
-                borderSide: const BorderSide(color: borderGlow),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(8),
-                borderSide: const BorderSide(color: accentCyan),
-              ),
-            ),
+            role: 'standard',
+            accent: accentCyan,
+            buttonIcon: Icons.upload_rounded,
+            buttonBg: accentBlue,
+            buttonFg: Colors.white,
+            buttonText: 'رفع إشارة Standard',
           ),
-          const SizedBox(height: 8),
-          ElevatedButton.icon(
-            onPressed: () => _uploadStrategy('standard'),
-            icon: const Icon(Icons.upload_rounded, size: 16),
-            label: const Text('رفع استراتيجية Standard'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: accentBlue,
-              foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8),
-              ),
-            ),
-          ),
-
-          const Divider(color: borderGlow, height: 28),
-
-          // VIP
-          Text(
-            'استراتيجية VIP',
-            style: GoogleFonts.outfit(
-              fontSize: 13,
-              color: Colors.amber,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 8),
-          TextField(
+          const SizedBox(height: 14),
+          _strategySlot(
+            title: 'استراتيجية VIP',
             controller: _vipStrategyCtrl,
-            maxLines: 6,
-            style: GoogleFonts.outfit(fontSize: 11, color: textPrimary),
-            decoration: InputDecoration(
-              hintText: 'الصق محتوى ملف JSON للاستراتيجية VIP هنا...',
-              hintStyle: GoogleFonts.outfit(color: textSecondary, fontSize: 11),
-              filled: true,
-              fillColor: spaceBackground,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(8),
-                borderSide: const BorderSide(color: borderGlow),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(8),
-                borderSide: const BorderSide(color: borderGlow),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(8),
-                borderSide: BorderSide(color: Colors.amber.withAlpha(180)),
-              ),
-            ),
+            role: 'vip',
+            accent: Colors.amber,
+            buttonIcon: Icons.workspace_premium_rounded,
+            buttonBg: Colors.amber,
+            buttonFg: Colors.black,
+            buttonText: 'رفع إشارة VIP',
           ),
-          const SizedBox(height: 8),
-          ElevatedButton.icon(
-            onPressed: () => _uploadStrategy('vip'),
-            icon: const Icon(Icons.workspace_premium_rounded, size: 16),
-            label: const Text('رفع استراتيجية VIP'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.amber,
-              foregroundColor: Colors.black,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8),
+
+          const Divider(color: borderGlow, height: 32),
+
+          // ── Smart monitoring strategies ────────────────────────────────
+          Row(
+            children: [
+              const Icon(Icons.radar_rounded, color: warningOrange, size: 15),
+              const SizedBox(width: 6),
+              Text(
+                'المراقبة الذكية',
+                style: GoogleFonts.outfit(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  color: warningOrange,
+                ),
               ),
-            ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'نفس صيغة الـ JSON ونفس المؤشرات — الفرق أنها تُحسب على بداية كل شمعة جديدة وتطلق إشارة فقط عند تحقق min_score.',
+            style: GoogleFonts.outfit(fontSize: 10.5, color: textSecondary),
+          ),
+          const SizedBox(height: 10),
+          _strategySlot(
+            title: 'مراقبة Standard',
+            controller: _monStdStrategyCtrl,
+            role: 'monitoring_standard',
+            accent: warningOrange,
+            buttonIcon: Icons.radar_rounded,
+            buttonBg: warningOrange,
+            buttonFg: Colors.black,
+            buttonText: 'رفع مراقبة Standard',
+          ),
+          const SizedBox(height: 14),
+          _strategySlot(
+            title: 'مراقبة VIP',
+            controller: _monVipStrategyCtrl,
+            role: 'monitoring_vip',
+            accent: Colors.deepOrangeAccent,
+            buttonIcon: Icons.radar_rounded,
+            buttonBg: Colors.deepOrangeAccent,
+            buttonFg: Colors.white,
+            buttonText: 'رفع مراقبة VIP',
           ),
         ],
       ),
