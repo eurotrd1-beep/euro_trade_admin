@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart' show DateFormat;
@@ -55,6 +56,19 @@ class _AdminDashboardState extends State<AdminDashboard> {
   // ── Database size warning ────────────────────────────────────────
   double? _dbSizeMb;
   Timer? _dbSizeTimer;
+
+  // ── Server settings (switch Render servers live) ─────────────────
+  final _tvServerCtrl = TextEditingController();
+  final _otcServerCtrl = TextEditingController();
+  bool _tvSaving = false;
+  bool _otcSaving = false;
+  bool _tvTesting = false;
+  bool _otcTesting = false;
+  // Live status: null = unknown, true = up, false = down.
+  bool? _tvOnline;
+  int _tvPingMs = 0;
+  DateTime? _tvCheckedAt;
+  Timer? _serverStatusTimer;
 
   // Controllers for Global VIP
   final _globalVipValueController = TextEditingController(text: '30');
@@ -1633,6 +1647,12 @@ class _AdminDashboardState extends State<AdminDashboard> {
       const Duration(minutes: 5),
       (_) => _fetchDbSize(),
     );
+    // Live server-status: ping TV /health now + every 30s.
+    _refreshTvStatus();
+    _serverStatusTimer = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => _refreshTvStatus(),
+    );
   }
 
   Future<void> _fetchDbSize() async {
@@ -1822,6 +1842,9 @@ class _AdminDashboardState extends State<AdminDashboard> {
   void dispose() {
     _newUserSubscription?.cancel();
     _dbSizeTimer?.cancel();
+    _serverStatusTimer?.cancel();
+    _tvServerCtrl.dispose();
+    _otcServerCtrl.dispose();
     _newUserOverlay?.remove();
     _globalVipValueController.dispose();
     _brNameCtrl.dispose();
@@ -5833,6 +5856,433 @@ class _AdminDashboardState extends State<AdminDashboard> {
   }
 
   // ══════════════════════════════════════════════════════════════════
+  // SERVER SETTINGS — switch which Render server the app/scrapers use
+  // ══════════════════════════════════════════════════════════════════
+
+  /// Normalizes + validates a server URL. Returns the cleaned URL, or null if
+  /// invalid (empty / not http(s) / unparseable).
+  String? _validateServerUrl(String raw) {
+    var u = raw.trim();
+    if (u.isEmpty) return null;
+    // Must be a full https URL (spec: reject values without https).
+    if (!u.startsWith('https://') && !u.startsWith('http://')) return null;
+    final uri = Uri.tryParse(u);
+    if (uri == null || uri.host.isEmpty) return null;
+    // Strip trailing slashes so `$base/api/...` never doubles up.
+    u = u.replaceAll(RegExp(r'/+$'), '');
+    return u;
+  }
+
+  /// Saves a server URL to `configs` (id = [configId]) after validation. Refuses
+  /// to overwrite the working URL with an invalid/empty value.
+  Future<void> _saveServerUrl(String configId, String raw) async {
+    final isOtc = configId == 'otc_server_url';
+    final clean = _validateServerUrl(raw);
+    if (clean == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'رابط غير صالح — لازم يبدأ بـ https:// ويكون رابط كامل صحيح',
+              style: GoogleFonts.outfit(),
+            ),
+            backgroundColor: putRed,
+          ),
+        );
+      }
+      return;
+    }
+    setState(() => isOtc ? _otcSaving = true : _tvSaving = true);
+    try {
+      await Supabase.instance.client.from('configs').upsert({
+        'id': configId,
+        'data': {
+          'url': clean,
+          'updatedAt': DateTime.now().toUtc().toIso8601String(),
+        },
+      });
+      if (mounted) {
+        (isOtc ? _otcServerCtrl : _tvServerCtrl).clear();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              isOtc
+                  ? 'تم حفظ رابط سيرفر OTC ✅ (للمراقبة)'
+                  : 'تم حفظ رابط TradingView ✅ — كل الأجهزة هتتحول فورًا',
+              style: GoogleFonts.outfit(),
+            ),
+            backgroundColor: callGreen,
+          ),
+        );
+      }
+      // Refresh the TV live indicator against the new URL right away.
+      if (!isOtc) _refreshTvStatus();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('خطأ في الحفظ: $e'), backgroundColor: putRed),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => isOtc ? _otcSaving = false : _tvSaving = false);
+      }
+    }
+  }
+
+  /// GET `<url>/health` — true if the server answers 200 within the timeout.
+  Future<bool> _pingHealth(String url) async {
+    final clean = _validateServerUrl(url);
+    if (clean == null) return false;
+    try {
+      final resp = await http
+          .get(Uri.parse('$clean/health'))
+          .timeout(const Duration(seconds: 12));
+      return resp.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<String> _currentUrl(String configId) async {
+    try {
+      final row = await Supabase.instance.client
+          .from('configs')
+          .select('data')
+          .eq('id', configId)
+          .maybeSingle();
+      final data = row?['data'] as Map<String, dynamic>? ?? {};
+      return (data['url'] as String?)?.trim() ?? '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// Refreshes the live TradingView status (pings the currently-saved URL).
+  Future<void> _refreshTvStatus() async {
+    final url = await _currentUrl('tv_server_url');
+    if (url.isEmpty) return;
+    final sw = Stopwatch()..start();
+    final ok = await _pingHealth(url);
+    sw.stop();
+    if (!mounted) return;
+    setState(() {
+      _tvOnline = ok;
+      _tvPingMs = sw.elapsedMilliseconds;
+      _tvCheckedAt = DateTime.now();
+    });
+  }
+
+  /// "Test connection" button — pings the URL typed in the field (or the saved
+  /// one if the field is empty) and reports the result.
+  Future<void> _testServer(String configId, String typed) async {
+    final isOtc = configId == 'otc_server_url';
+    var url = typed.trim();
+    if (url.isEmpty) url = await _currentUrl(configId);
+    if (_validateServerUrl(url) == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('اكتب رابط صحيح الأول', style: GoogleFonts.outfit()),
+            backgroundColor: warningOrange,
+          ),
+        );
+      }
+      return;
+    }
+    setState(() => isOtc ? _otcTesting = true : _tvTesting = true);
+    final ok = await _pingHealth(url);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            ok ? '✅ السيرفر يستجيب بنجاح' : '❌ تعذر الوصول للسيرفر، تحقق من الرابط',
+            style: GoogleFonts.outfit(),
+          ),
+          backgroundColor: ok ? callGreen : putRed,
+        ),
+      );
+      setState(() => isOtc ? _otcTesting = false : _tvTesting = false);
+    }
+  }
+
+  Widget _buildServerSettingsSection() {
+    return StreamBuilder<List<Map<String, dynamic>>>(
+      stream:
+          Supabase.instance.client.from('configs').stream(primaryKey: ['id']),
+      builder: (context, snap) {
+        final rows = snap.data ?? [];
+        String tvUrl = '';
+        String otcUrl = '';
+        DateTime? otcHeartbeat;
+        for (final r in rows) {
+          final d = r['data'];
+          if (r['id'] == 'tv_server_url' && d is Map) {
+            tvUrl = (d['url'] as String?)?.trim() ?? '';
+          } else if (r['id'] == 'otc_server_url' && d is Map) {
+            otcUrl = (d['url'] as String?)?.trim() ?? '';
+          } else if (r['id'] == 'otc_status' && d is Map) {
+            otcHeartbeat = DateTime.tryParse(d['updatedAt']?.toString() ?? '');
+          }
+        }
+        // OTC live status comes from the scraper's Supabase heartbeat (accurate),
+        // not an HTTP ping — the OTC server writes data to Supabase.
+        final otcAgeSec = otcHeartbeat == null
+            ? null
+            : DateTime.now().toUtc().difference(otcHeartbeat.toUtc()).inSeconds;
+        final otcOnline = otcAgeSec != null && otcAgeSec < 90;
+
+        return Container(
+          decoration: BoxDecoration(
+            color: cardBgColor,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: borderGlow),
+          ),
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.dns_rounded, color: accentCyan, size: 20),
+                  const SizedBox(width: 10),
+                  Text(
+                    'إعدادات السيرفرات',
+                    style: GoogleFonts.outfit(
+                        color: textPrimary,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'بدّل سيرفر Render لأي خدمة فورًا لو خلص الـ bandwidth — بتحط الرابط الجديد وتضغط حفظ، وكل الأجهزة تتحول تلقائيًا بدون إعادة نشر.',
+                style: GoogleFonts.outfit(color: textSecondary, fontSize: 10, height: 1.5),
+              ),
+              const SizedBox(height: 14),
+              _serverConfigCard(
+                title: 'سيرفر TradingView',
+                subtitle: 'التطبيق بيتصل بيه مباشرة (الشارت + الأسعار)',
+                icon: Icons.candlestick_chart_rounded,
+                currentUrl: tvUrl,
+                controller: _tvServerCtrl,
+                configId: 'tv_server_url',
+                saving: _tvSaving,
+                testing: _tvTesting,
+                statusWidget: _liveStatusChip(
+                  online: _tvOnline,
+                  label: _tvOnline == null
+                      ? 'جاري الفحص...'
+                      : _tvOnline == true
+                          ? 'متصل — استجابة ${_tvPingMs}ms'
+                          : 'غير متاح',
+                  sinceLabel: _tvCheckedAt == null
+                      ? ''
+                      : 'آخر فحص ${_timeAgoAr(_tvCheckedAt)}',
+                ),
+              ),
+              const SizedBox(height: 12),
+              _serverConfigCard(
+                title: 'سيرفر OTC (Pocket Option)',
+                subtitle: 'بيكتب البيانات في Supabase — الحالة من heartbeat السكرابر',
+                icon: Icons.hub_rounded,
+                currentUrl: otcUrl,
+                controller: _otcServerCtrl,
+                configId: 'otc_server_url',
+                saving: _otcSaving,
+                testing: _otcTesting,
+                statusWidget: _liveStatusChip(
+                  online: otcAgeSec == null ? null : otcOnline,
+                  label: otcAgeSec == null
+                      ? 'لا توجد بيانات'
+                      : otcOnline
+                          ? 'السكرابر يكتب'
+                          : 'لا تحديثات',
+                  sinceLabel: otcAgeSec == null
+                      ? ''
+                      : 'آخر تحديث منذ ${otcAgeSec}ث',
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _liveStatusChip({
+    required bool? online,
+    required String label,
+    required String sinceLabel,
+  }) {
+    final color = online == null
+        ? textSecondary
+        : online
+            ? callGreen
+            : putRed;
+    final dot = online == null ? '⚪' : (online ? '🟢' : '🔴');
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(dot, style: const TextStyle(fontSize: 11)),
+        const SizedBox(width: 5),
+        Flexible(
+          child: Text(
+            sinceLabel.isEmpty ? label : '$label • $sinceLabel',
+            overflow: TextOverflow.ellipsis,
+            style: GoogleFonts.outfit(
+                color: color, fontSize: 11, fontWeight: FontWeight.w600),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _serverConfigCard({
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    required String currentUrl,
+    required TextEditingController controller,
+    required String configId,
+    required bool saving,
+    required bool testing,
+    required Widget statusWidget,
+  }) {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF0B1220),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: borderGlow),
+      ),
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, color: accentCyan, size: 16),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title,
+                  style: GoogleFonts.outfit(
+                      color: textPrimary,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13),
+                ),
+              ),
+              statusWidget,
+            ],
+          ),
+          const SizedBox(height: 2),
+          Text(subtitle,
+              style: GoogleFonts.outfit(color: textSecondary, fontSize: 10)),
+          const SizedBox(height: 6),
+          // Current effective URL.
+          Row(
+            children: [
+              Text('الحالي: ',
+                  style: GoogleFonts.outfit(color: textSecondary, fontSize: 10)),
+              Expanded(
+                child: Text(
+                  currentUrl.isEmpty ? '—' : currentUrl,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.outfit(
+                      color: accentCyan,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: controller,
+            style: GoogleFonts.outfit(color: textPrimary, fontSize: 12),
+            keyboardType: TextInputType.url,
+            decoration: InputDecoration(
+              isDense: true,
+              hintText: currentUrl.isEmpty
+                  ? 'https://your-new-server.onrender.com'
+                  : currentUrl,
+              hintStyle:
+                  GoogleFonts.outfit(color: textSecondary, fontSize: 11),
+              filled: true,
+              fillColor: const Color(0xFF111827),
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide(color: borderGlow),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide(color: accentCyan),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: saving
+                      ? null
+                      : () => _saveServerUrl(configId, controller.text),
+                  icon: saving
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white))
+                      : const Icon(Icons.save_rounded, size: 15),
+                  label: Text('حفظ',
+                      style: GoogleFonts.outfit(
+                          fontWeight: FontWeight.bold, fontSize: 12)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: accentCyan,
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8)),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: testing
+                      ? null
+                      : () => _testServer(configId, controller.text),
+                  icon: testing
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: accentCyan))
+                      : const Icon(Icons.wifi_tethering_rounded, size: 15),
+                  label: Text('اختبار الاتصال',
+                      style: GoogleFonts.outfit(
+                          fontWeight: FontWeight.bold, fontSize: 12)),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: accentCyan,
+                    side: BorderSide(color: accentCyan),
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8)),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════════
   // VIEW 7 — APP CONTROL (Maintenance + User Bans overview)
   // ══════════════════════════════════════════════════════════════════
   Widget _buildAppControlView() {
@@ -5849,6 +6299,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
               color: textPrimary,
             ),
           ),
+          const SizedBox(height: 16),
+
+          // ── Server Settings (switch Render servers live) ──────────
+          _buildServerSettingsSection(),
           const SizedBox(height: 16),
 
           // ── System Settings (price source) ────────────────────────
