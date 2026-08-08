@@ -1,0 +1,27 @@
+name: passkeys_web
+description: >-
+  Local no-op override of passkeys_web (pulled transitively by supabase_flutter).
+  The real registerWith() calls PasskeyAuthenticator.init() — a Corbado JS SDK we
+  never ship — which throws during plugin registration and blanks the whole app.
+  This override registers a do-nothing platform so the crash cannot happen.
+version: 2.9.0
+publish_to: none
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.19.0"
+
+flutter:
+  plugin:
+    implements: passkeys
+    platforms:
+      web:
+        pluginClass: PasskeysWeb
+        fileName: passkeys_web.dart
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_web_plugins:
+    sdk: flutter
+  passkeys_platform_interface: ^2.4.0

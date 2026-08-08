@@ -44,6 +44,14 @@ dependencies:
   dart_jsonwebtoken: ^2.8.0
   file_picker: ^8.1.0
 
+# DEFINITIVE blank-page fix: replace the transitive `passkeys_web` (from
+# supabase_flutter) with a local no-op. Its real registerWith() calls a Corbado
+# JS SDK we never ship and crashes plugin registration → blank white page. The
+# app doesn't use passkeys, so a do-nothing implementation is safe.
+dependency_overrides:
+  passkeys_web:
+    path: passkeys_web_stub
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
