@@ -41,7 +41,22 @@
     For more details:
     * https://docs.flutter.dev/platform-integration/web/initialization
   -->
-  <script src="passkeys_stub.js"></script>
+  <script>
+    // Inline no-op stub for passkeys_web (transitive via supabase_flutter). Its
+    // registerWith() calls PasskeyAuthenticator.init() at startup and BLANKS the
+    // whole app ("Cannot read properties of undefined (reading 'init')") if this
+    // global is missing. Inlined (not an external file) so a stale service worker
+    // or HTTP cache can never serve it empty. The app does not use passkeys.
+    window.PasskeyAuthenticator = window.PasskeyAuthenticator || {
+      init: function () {},
+      register: function () { return Promise.reject('passkeys not supported'); },
+      login: function () { return Promise.reject('passkeys not supported'); },
+      cancelCurrentAuthenticatorOperation: function () {},
+      isUserVerifyingPlatformAuthenticatorAvailable: function () { return Promise.resolve(false); },
+      isConditionalMediationAvailable: function () { return Promise.resolve(false); },
+      hasPasskeySupport: function () { return false; }
+    };
+  </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>
