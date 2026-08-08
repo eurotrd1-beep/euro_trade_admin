@@ -8,6 +8,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart' show DateFormat;
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:image_picker/image_picker.dart';
+import 'system_repair_screen.dart';
 import 'package:file_picker/file_picker.dart';
 import '../utils/js_bridge.dart';
 
@@ -2570,6 +2571,26 @@ class _AdminDashboardState extends State<AdminDashboard> {
             'مكتبة أزواج OTC',
             Icons.hub_rounded,
           ),
+          // System Repair — opens as a full-screen route (not an IndexedStack tab).
+          InkWell(
+            onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const SystemRepairScreen())),
+            child: Container(
+              margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 12),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFFF59E0B).withAlpha(60)),
+              ),
+              child: Row(children: [
+                const Icon(Icons.healing_rounded, color: Color(0xFFF59E0B), size: 20),
+                const SizedBox(width: 12),
+                Text('🛠️ إصلاح النظام',
+                    style: GoogleFonts.outfit(
+                        fontSize: 13, fontWeight: FontWeight.bold, color: const Color(0xFFF59E0B))),
+              ]),
+            ),
+          ),
           const Spacer(),
           Padding(
             padding: const EdgeInsets.all(20),
@@ -2636,6 +2657,16 @@ class _AdminDashboardState extends State<AdminDashboard> {
             _buildMobileTabItem(6, 'الثيم 🎨'),
             _buildMobileTabItem(7, 'إعلان'),
             _buildMobileTabItem(8, 'OTC'),
+            InkWell(
+              onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const SystemRepairScreen())),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                child: Text('🛠️ إصلاح',
+                    style: GoogleFonts.outfit(
+                        fontSize: 13, fontWeight: FontWeight.bold, color: const Color(0xFFF59E0B))),
+              ),
+            ),
           ],
         ),
       ),
