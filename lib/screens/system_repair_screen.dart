@@ -57,7 +57,8 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
   bool _running = false;
   int _done = 0;
   String _activeProxy = _kOrigin; // configs.proxy_server_url (what the app uses)
-  bool _wsOk = false; // shared /ws result (worker + gwin sections)
+  bool _wsOk = false; // /ws through the WORKER (wk_ws section)
+  bool _wsOkActive = false; // /ws through the ACTIVE proxy (guaranteed-win section)
 
   // Gemini
   bool _geminiLoading = false;
@@ -74,6 +75,9 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
   // In-page notifications (from repair_log) + browser desktop-notification perm
   List<Map<String, dynamic>> _notifs = [];
   String _notifPerm = 'default';
+  // Persistent controller — building it inside _poTokenBox() wiped the pasted PO
+  // token on every rebuild (per-check ticks + 30s live mode).
+  final TextEditingController _poTokenCtrl = TextEditingController();
 
   final _sections = const [
     ['proxy', '⚙️ البروكسي / Render'],
@@ -98,6 +102,7 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
   @override
   void dispose() {
     _liveTimer?.cancel();
+    _poTokenCtrl.dispose();
     super.dispose();
   }
 
@@ -203,9 +208,13 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
         c.danger = false;
       }
     });
-    // Prime shared state (active proxy + /ws) first.
+    // Prime shared state (active proxy + /ws) first. gwin rides the ACTIVE
+    // proxy's /ws, not the Worker's — probe both so g_ws reflects reality.
     _activeProxy = await _readActiveProxy();
     _wsOk = await checkWebSocket(_wsUrl(_kWorker), 'EURUSD_otc');
+    _wsOkActive = _activeProxy == _kWorker
+        ? _wsOk
+        : await checkWebSocket(_wsUrl(_activeProxy), 'EURUSD_otc');
     await Future.wait(_checks.map((c) => _runOne(c).timeout(const Duration(seconds: 20), onTimeout: () {
           _set(c, RStatus.warn, 'انتهت المهلة', cause: 'الفحص أخذ أكتر من 20 ثانية');
         })));
@@ -420,7 +429,15 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
           } else {
             final closed = st['closed'] as int? ?? 0;
             final total = st['count'] as int? ?? 0;
-            _set(c, RStatus.ok, '$closed مقفول / $total (متسق مع فلاجات PO) ✅');
+            final age = (st['newestAge'] as int?) ?? 999;
+            final open = total - closed;
+            // Actually check consistency: pairs marked OPEN should have FRESH prices.
+            if (open > 0 && age > 90) {
+              _set(c, RStatus.warn, '$closed مقفول / $total — بس الأسعار قديمة (${age}s)',
+                  cause: 'أزواج «مفتوحة» ومصدر السعر متأخّر — تعارض');
+            } else {
+              _set(c, RStatus.ok, '$closed مقفول / $total • أحدث سعر ${age}s ✅');
+            }
           }
           break;
         case 'd_engine':
@@ -481,10 +498,30 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
           } else {
             final ps = u['projectStatus']?.toString() ?? '?';
             final healthy = ps == 'ACTIVE_HEALTHY';
-            _set(c, healthy ? RStatus.ok : RStatus.warn, 'المشروع: $ps',
-                cause: healthy ? '' : 'المشروع مش ACTIVE_HEALTHY',
-                fix: 'راجع الأرقام التفصيلية في الداشبورد (حد 500 اتصال / 5M رسالة / 250GB)',
-                url: _kSupaUsage, urlLabel: 'افتح Usage');
+            // If the API ever returns real usage numbers, flag any metric >90%.
+            final usage = u['usage'];
+            String? over;
+            if (usage is Map) {
+              usage.forEach((k, v) {
+                if (v is Map && v['usage'] is num && v['limit'] is num && (v['limit'] as num) > 0 &&
+                    (v['usage'] as num) / (v['limit'] as num) > 0.9) {
+                  over = k.toString();
+                }
+              });
+            }
+            if (!healthy) {
+              _set(c, RStatus.warn, 'المشروع: $ps', cause: 'المشروع مش ACTIVE_HEALTHY',
+                  fix: 'راجع الداشبورد', url: _kSupaUsage, urlLabel: 'افتح Usage');
+            } else if (over != null) {
+              _set(c, RStatus.warn, 'مقياس فوق 90%: $over', cause: 'قرّب على الحد',
+                  fix: 'راجع Usage', url: _kSupaUsage, urlLabel: 'افتح Usage');
+            } else {
+              // Honest: no usage numbers via the API — health only; the detailed
+              // connections/messages/egress %s live on the dashboard, not here.
+              _set(c, RStatus.ok, 'المشروع صحّي ($ps) — الأرقام التفصيلية على الداشبورد فقط',
+                  fix: 'الاستهلاك (اتصالات/رسائل/Egress، حد 500/5M/250GB) من صفحة Usage',
+                  url: _kSupaUsage, urlLabel: 'افتح Usage');
+            }
           }
           break;
 
@@ -538,7 +575,7 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
           _set(c, RStatus.ok, 'مفعّل على $n مستخدم');
           break;
         case 'g_ws':
-          if (_wsOk) {
+          if (_wsOkActive) {
             _set(c, RStatus.ok, 'الـ WS متصل — ضمان الفوز هيشتغل ✅');
           } else {
             _set(c, RStatus.fail, '🔴 الـ WS مقطوع — ضمان الفوز مش هيشتغل', cause: 'مصدر السعر اللحظي مقطوع',
@@ -1108,7 +1145,7 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
       );
 
   Widget _poTokenBox() {
-    final ctrl = TextEditingController();
+    final ctrl = _poTokenCtrl; // persistent — survives rebuilds so paste isn't lost
     return Container(
       margin: const EdgeInsets.only(top: 10),
       padding: const EdgeInsets.all(10),
