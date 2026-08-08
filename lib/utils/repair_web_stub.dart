@@ -6,4 +6,10 @@ Future<bool> checkWebSocket(String wsUrl, String sym,
 
 void openTab(String url) {}
 
+Future<String> requestNotifyPermission() async => 'unsupported';
+
+String notifyPermission() => 'unsupported';
+
+void notifyDesktop(String title, String body) {}
+
 Future<String> clearWebCaches() async => 'غير متاح';

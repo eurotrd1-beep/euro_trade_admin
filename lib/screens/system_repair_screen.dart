@@ -71,6 +71,9 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
   Timer? _liveTimer;
   bool _alertBusy = false;
   int _lastAutoAlertMs = 0;
+  // In-page notifications (from repair_log) + browser desktop-notification perm
+  List<Map<String, dynamic>> _notifs = [];
+  String _notifPerm = 'default';
 
   final _sections = const [
     ['proxy', '⚙️ البروكسي / Render'],
@@ -86,7 +89,9 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
   @override
   void initState() {
     super.initState();
+    _notifPerm = notifyPermission();
     _loadOps();
+    _loadNotifs();
     _runAll();
   }
 
@@ -205,7 +210,7 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
           _set(c, RStatus.warn, 'انتهت المهلة', cause: 'الفحص أخذ أكتر من 20 ثانية');
         })));
     if (mounted) setState(() => _running = false);
-    _maybeAlertOnRed();
+    _afterScan();
   }
 
   void _tick() {
@@ -823,6 +828,7 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
           padding: const EdgeInsets.all(14),
           children: [
             _topBar(sum),
+            _notifCard(),
             const SizedBox(height: 12),
             for (final s in _sections) _sectionTile(s[0], s[1]),
             const SizedBox(height: 16),
@@ -884,6 +890,8 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
               _actionBtn('♻️ إعادة تشغيل البروكسي', _amber,
                   _running ? null : () => _confirmFix('إعادة تشغيل البروكسي', 'هيعمل redeploy للبروكسي على Render (زي Manual Deploy). بيرجع خلال ~1–2 دقيقة.', _restartProxy)),
             _actionBtn(_liveMode ? '⏸️ إيقاف المراقبة' : '📡 مراقبة حيّة', _liveMode ? _amber : _purple, _toggleLive),
+            if (_notifPerm != 'granted')
+              _actionBtn('🔔 فعّل تنبيهات المتصفح', _cyan, _enableBrowserNotifs),
             if (_opsTelegram)
               _actionBtn('🔔 اختبر التنبيه', _cyan, _alertBusy
                   ? null
@@ -925,6 +933,59 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
         ),
         child: Text(t, style: GoogleFonts.outfit(color: c, fontSize: 12, fontWeight: FontWeight.w600)),
       );
+
+  Widget _notifCard() {
+    if (_notifs.isEmpty) return const SizedBox.shrink();
+    final hasWatch = _notifs.any((n) => (n['action'] ?? '') == 'watchdog');
+    return Container(
+      margin: const EdgeInsets.only(top: 12),
+      decoration: BoxDecoration(
+        color: _card, borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: hasWatch ? _red.withAlpha(120) : _border),
+      ),
+      child: Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent, colorScheme: const ColorScheme.dark(primary: _cyan)),
+        child: ExpansionTile(
+          initiallyExpanded: hasWatch,
+          leading: const Text('🔔', style: TextStyle(fontSize: 18)),
+          title: Text('آخر التنبيهات والإصلاحات (${_notifs.length})',
+              style: GoogleFonts.outfit(color: _text, fontWeight: FontWeight.bold, fontSize: 13.5)),
+          childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+          children: _notifs.map(_notifRow).toList(),
+        ),
+      ),
+    );
+  }
+
+  Widget _notifRow(Map<String, dynamic> n) {
+    final action = (n['action'] ?? '').toString();
+    final result = (n['result'] ?? '').toString();
+    final isWatch = action == 'watchdog';
+    final c = isWatch ? _red : _muted;
+    final icon = isWatch ? '🔴' : (action == 'auto_heal' ? '🛠️' : '✅');
+    String when = (n['at'] ?? '').toString();
+    try {
+      final dt = DateTime.parse(when).toLocal();
+      String two(int x) => x.toString().padLeft(2, '0');
+      when = '${two(dt.hour)}:${two(dt.minute)} ${dt.day}/${dt.month}';
+    } catch (_) {}
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(icon, style: const TextStyle(fontSize: 12)),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(action, style: GoogleFonts.robotoMono(color: c, fontSize: 11, fontWeight: FontWeight.bold)),
+            if (result.isNotEmpty)
+              Text(result, style: GoogleFonts.outfit(color: _muted, fontSize: 11, height: 1.4)),
+          ]),
+        ),
+        const SizedBox(width: 6),
+        Text(when, style: GoogleFonts.robotoMono(color: _muted, fontSize: 10)),
+      ]),
+    );
+  }
 
   Widget _pill(String t, Color c) => Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
@@ -1241,15 +1302,40 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
     throw Exception(d['reason']?.toString() ?? 'التنبيه مش متاح');
   }
 
-  void _maybeAlertOnRed() {
-    if (!_opsTelegram) return;
+  Future<void> _loadNotifs() async {
+    try {
+      final rows = await _sb
+          .from('repair_log')
+          .select('action,result,at')
+          .order('at', ascending: false)
+          .limit(20);
+      if (mounted) setState(() => _notifs = (rows as List).cast<Map<String, dynamic>>());
+    } catch (_) {}
+  }
+
+  void _afterScan() {
+    _loadNotifs(); // repairs + watchdog incidents feed the notifications panel
     final fails = _checks.where((c) => c.status == RStatus.fail).toList();
     if (fails.isEmpty) return;
     final now = DateTime.now().millisecondsSinceEpoch;
-    if (now - _lastAutoAlertMs < 15 * 60 * 1000) return; // client debounce 15 min
+    if (now - _lastAutoAlertMs < 15 * 60 * 1000) return; // debounce 15 min
     _lastAutoAlertMs = now;
-    final lines = fails.take(8).map((c) => '🔴 ${c.title}: ${c.detail}').join('\n');
-    _sendAlert('⚠️ إصلاح النظام لقى ${fails.length} مشكلة:\n$lines').then((_) {}).catchError((_) {});
+    // In-page / browser desktop notification (no external service, no Telegram).
+    notifyDesktop('⚠️ إصلاح النظام: ${fails.length} مشكلة',
+        fails.take(3).map((c) => c.title).join(' • '));
+    // Telegram too, ONLY if the user later configures it (dormant otherwise).
+    if (_opsTelegram) {
+      final lines = fails.take(8).map((c) => '🔴 ${c.title}: ${c.detail}').join('\n');
+      _sendAlert('⚠️ إصلاح النظام لقى ${fails.length} مشكلة:\n$lines').then((_) {}).catchError((_) {});
+    }
+  }
+
+  Future<void> _enableBrowserNotifs() async {
+    final p = await requestNotifyPermission();
+    if (mounted) setState(() => _notifPerm = p);
+    _snack(p == 'granted'
+        ? 'تنبيهات المتصفح اشتغلت ✅ — هتوصلك لو حاجة وقعت والتاب مفتوح.'
+        : (p == 'denied' ? 'المتصفح رافض التنبيهات — فعّلها من إعدادات الموقع.' : 'اتلغى الطلب.'));
   }
 
   int _autoFixableCount() =>

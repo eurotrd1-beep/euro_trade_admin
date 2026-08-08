@@ -50,6 +50,35 @@ void openTab(String url) {
   } catch (_) {}
 }
 
+/// Ask the browser for desktop-notification permission. Returns the result
+/// ('granted' | 'denied' | 'default' | 'unsupported').
+Future<String> requestNotifyPermission() async {
+  try {
+    return await html.Notification.requestPermission();
+  } catch (_) {
+    return 'unsupported';
+  }
+}
+
+/// Current desktop-notification permission ('granted'/'denied'/'default'/…).
+String notifyPermission() {
+  try {
+    return html.Notification.permission ?? 'default';
+  } catch (_) {
+    return 'unsupported';
+  }
+}
+
+/// Show a desktop notification (no-op unless permission granted). The in-page
+/// alternative to external push — nothing leaves the browser.
+void notifyDesktop(String title, String body) {
+  try {
+    if (html.Notification.permission == 'granted') {
+      html.Notification(title, body: body);
+    }
+  } catch (_) {}
+}
+
 /// Best-effort clear of the browser's Cache Storage + unregister service workers
 /// (the "مسح الكاش المحلي" repair). Returns a short human summary.
 Future<String> clearWebCaches() async {
