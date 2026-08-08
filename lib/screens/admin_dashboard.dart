@@ -59,11 +59,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
   // ── Server settings (switch Render servers live) ─────────────────
   final _proxyServerCtrl = TextEditingController();
-  final _otcServerCtrl = TextEditingController();
   bool _proxySaving = false;
-  bool _otcSaving = false;
   bool _proxyTesting = false;
-  bool _otcTesting = false;
   // Live status: null = unknown, true = up, false = down.
   bool? _proxyOnline;
   int _proxyPingMs = 0;
@@ -1843,7 +1840,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
     _dbSizeTimer?.cancel();
     _serverStatusTimer?.cancel();
     _proxyServerCtrl.dispose();
-    _otcServerCtrl.dispose();
     _newUserOverlay?.remove();
     _globalVipValueController.dispose();
     _brNameCtrl.dispose();
@@ -5873,7 +5869,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
   /// Saves a server URL to `configs` (id = [configId]) after validation. Refuses
   /// to overwrite the working URL with an invalid/empty value.
   Future<void> _saveServerUrl(String configId, String raw) async {
-    final isOtc = configId == 'otc_server_url';
     final clean = _validateServerUrl(raw);
     if (clean == null) {
       if (mounted) {
@@ -5889,7 +5884,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
       }
       return;
     }
-    setState(() => isOtc ? _otcSaving = true : _proxySaving = true);
+    setState(() => _proxySaving = true);
     try {
       await Supabase.instance.client.from('configs').upsert({
         'id': configId,
@@ -5899,21 +5894,19 @@ class _AdminDashboardState extends State<AdminDashboard> {
         },
       });
       if (mounted) {
-        (isOtc ? _otcServerCtrl : _proxyServerCtrl).clear();
+        _proxyServerCtrl.clear();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              isOtc
-                  ? 'تم حفظ رابط سيرفر OTC ✅ (للمراقبة)'
-                  : 'تم حفظ رابط السيرفر ✅ — كل الأجهزة هتتحول فورًا',
+              'تم حفظ رابط السيرفر ✅ — كل الأجهزة هتتحول فورًا',
               style: GoogleFonts.outfit(),
             ),
             backgroundColor: callGreen,
           ),
         );
       }
-      // Refresh the TV live indicator against the new URL right away.
-      if (!isOtc) _refreshProxyStatus();
+      // Refresh the live indicator against the new URL right away.
+      _refreshProxyStatus();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -5922,7 +5915,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
       }
     } finally {
       if (mounted) {
-        setState(() => isOtc ? _otcSaving = false : _proxySaving = false);
+        setState(() => _proxySaving = false);
       }
     }
   }
@@ -5973,7 +5966,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
   /// "Test connection" button — pings the URL typed in the field (or the saved
   /// one if the field is empty) and reports the result.
   Future<void> _testServer(String configId, String typed) async {
-    final isOtc = configId == 'otc_server_url';
     var url = typed.trim();
     if (url.isEmpty) url = await _currentUrl(configId);
     if (_validateServerUrl(url) == null) {
@@ -5987,7 +5979,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
       }
       return;
     }
-    setState(() => isOtc ? _otcTesting = true : _proxyTesting = true);
+    setState(() => _proxyTesting = true);
     final ok = await _pingHealth(url);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -5999,7 +5991,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
           backgroundColor: ok ? callGreen : putRed,
         ),
       );
-      setState(() => isOtc ? _otcTesting = false : _proxyTesting = false);
+      setState(() => _proxyTesting = false);
     }
   }
 
@@ -6010,24 +6002,12 @@ class _AdminDashboardState extends State<AdminDashboard> {
       builder: (context, snap) {
         final rows = snap.data ?? [];
         String proxyUrl = '';
-        String otcUrl = '';
-        DateTime? otcHeartbeat;
         for (final r in rows) {
           final d = r['data'];
           if (r['id'] == 'proxy_server_url' && d is Map) {
             proxyUrl = (d['url'] as String?)?.trim() ?? '';
-          } else if (r['id'] == 'otc_server_url' && d is Map) {
-            otcUrl = (d['url'] as String?)?.trim() ?? '';
-          } else if (r['id'] == 'otc_status' && d is Map) {
-            otcHeartbeat = DateTime.tryParse(d['updatedAt']?.toString() ?? '');
           }
         }
-        // OTC live status comes from the scraper's Supabase heartbeat (accurate),
-        // not an HTTP ping — the OTC server writes data to Supabase.
-        final otcAgeSec = otcHeartbeat == null
-            ? null
-            : DateTime.now().toUtc().difference(otcHeartbeat.toUtc()).inSeconds;
-        final otcOnline = otcAgeSec != null && otcAgeSec < 90;
 
         return Container(
           decoration: BoxDecoration(
@@ -6077,28 +6057,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
                   sinceLabel: _proxyCheckedAt == null
                       ? ''
                       : 'آخر فحص ${_timeAgoAr(_proxyCheckedAt)}',
-                ),
-              ),
-              const SizedBox(height: 12),
-              _serverConfigCard(
-                title: 'سيرفر OTC (Pocket Option)',
-                subtitle: 'بيكتب البيانات في Supabase — الحالة من heartbeat السكرابر',
-                icon: Icons.hub_rounded,
-                currentUrl: otcUrl,
-                controller: _otcServerCtrl,
-                configId: 'otc_server_url',
-                saving: _otcSaving,
-                testing: _otcTesting,
-                statusWidget: _liveStatusChip(
-                  online: otcAgeSec == null ? null : otcOnline,
-                  label: otcAgeSec == null
-                      ? 'لا توجد بيانات'
-                      : otcOnline
-                          ? 'السكرابر يكتب'
-                          : 'لا تحديثات',
-                  sinceLabel: otcAgeSec == null
-                      ? ''
-                      : 'آخر تحديث منذ ${otcAgeSec}ث',
                 ),
               ),
             ],
