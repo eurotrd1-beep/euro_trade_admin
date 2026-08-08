@@ -64,6 +64,14 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
   String? _geminiText;
   String? _geminiError;
 
+  // Self-heal ops availability (from /api/ops-status)
+  bool _opsRender = false, _opsTelegram = false;
+  // Live monitoring + alert debounce
+  bool _liveMode = false;
+  Timer? _liveTimer;
+  bool _alertBusy = false;
+  int _lastAutoAlertMs = 0;
+
   final _sections = const [
     ['proxy', '⚙️ البروكسي / Render'],
     ['worker', '⚡ Cloudflare Worker'],
@@ -78,7 +86,14 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
   @override
   void initState() {
     super.initState();
+    _loadOps();
     _runAll();
+  }
+
+  @override
+  void dispose() {
+    _liveTimer?.cancel();
+    super.dispose();
   }
 
   // ══════════════════════════ Check catalogue ══════════════════════════
@@ -190,6 +205,7 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
           _set(c, RStatus.warn, 'انتهت المهلة', cause: 'الفحص أخذ أكتر من 20 ثانية');
         })));
     if (mounted) setState(() => _running = false);
+    _maybeAlertOnRed();
   }
 
   void _tick() {
@@ -263,8 +279,15 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
           }
           break;
         case 'proxy_restart':
-          _set(c, RStatus.na, 'زرار يدوي', fix: 'Render → الخدمة → Manual Deploy → Deploy latest commit',
-              url: _kRenderDash, urlLabel: 'افتح Render');
+          if (_opsRender) {
+            _set(c, RStatus.ok, 'جاهز — إعادة تشغيل بضغطة', fix: 'redeploy للبروكسي عبر Render API',
+                fixLabel: 'إعادة تشغيل البروكسي', action: _restartProxy, danger: true,
+                url: _kRenderDash, urlLabel: 'أو افتح Render');
+          } else {
+            _set(c, RStatus.na, 'زرار يدوي (فعّل RENDER_API_KEY للضغطة الواحدة)',
+                fix: 'Render → الخدمة → Manual Deploy → Deploy latest commit',
+                url: _kRenderDash, urlLabel: 'افتح Render');
+          }
           break;
 
         // ---- worker ----
@@ -667,11 +690,18 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
   }
 
   Future<String> _nudgeScraper() async {
+    // The scraper listens for configs.otc_scan.data.requestedAt + status=='requested'
+    // (po-scraper.js). Merge so we don't wipe fields other writers own.
+    Map cur = {};
+    try {
+      final row = await _sb.from('configs').select('data').eq('id', 'otc_scan').maybeSingle();
+      if (row != null && row['data'] is Map) cur = row['data'] as Map;
+    } catch (_) {}
     await _sb.from('configs').upsert({
       'id': 'otc_scan',
-      'data': {'trigger': DateTime.now().toUtc().toIso8601String()},
+      'data': {...cur, 'requestedAt': DateTime.now().toUtc().toIso8601String(), 'status': 'requested'},
     });
-    await _log('nudge_scraper', 'otc_scan trigger');
+    await _log('nudge_scraper', 'otc_scan requestedAt');
     return 'اتبعت إشارة للسكرابر يعيد المحاولة. استنى ~دقيقة وافحص تاني.';
   }
 
@@ -805,6 +835,12 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
   }
 
   Widget _topBar(Map<String, int> sum) {
+    final fails = sum['fail'] ?? 0, warns = sum['warn'] ?? 0;
+    final overallColor = fails > 0 ? _red : (warns > 0 ? _amber : _green);
+    final overallText = fails > 0
+        ? '🔴 النظام فيه $fails مشكلة'
+        : (warns > 0 ? '🟡 النظام شغّال مع $warns تحذير' : '🟢 النظام سليم تمامًا');
+    final autoN = _autoFixableCount();
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -812,6 +848,22 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
       ),
       child: Column(
         children: [
+          // Overall health banner
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+            decoration: BoxDecoration(
+              color: overallColor.withAlpha(24), borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: overallColor.withAlpha(120)),
+            ),
+            child: Row(children: [
+              Container(width: 12, height: 12, decoration: BoxDecoration(color: overallColor, shape: BoxShape.circle, boxShadow: [BoxShadow(color: overallColor.withAlpha(140), blurRadius: 8)])),
+              const SizedBox(width: 10),
+              Expanded(child: Text(_running ? '⚪ بيفحص النظام…' : overallText, style: GoogleFonts.outfit(color: overallColor, fontWeight: FontWeight.bold, fontSize: 14))),
+              if (_liveMode) Text('● مراقبة حيّة', style: GoogleFonts.outfit(color: _green, fontSize: 11)),
+            ]),
+          ),
+          const SizedBox(height: 12),
           SizedBox(
             width: double.infinity,
             child: ElevatedButton.icon(
@@ -824,6 +876,29 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
                   style: GoogleFonts.outfit(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 15)),
             ),
           ),
+          const SizedBox(height: 8),
+          // Self-heal / control buttons
+          Wrap(spacing: 8, runSpacing: 8, alignment: WrapAlignment.center, children: [
+            if (autoN > 0) _actionBtn('🛠️ صلّح كل الأحمر ($autoN)', _green, _running ? null : _autoHealAll),
+            if (_opsRender)
+              _actionBtn('♻️ إعادة تشغيل البروكسي', _amber,
+                  _running ? null : () => _confirmFix('إعادة تشغيل البروكسي', 'هيعمل redeploy للبروكسي على Render (زي Manual Deploy). بيرجع خلال ~1–2 دقيقة.', _restartProxy)),
+            _actionBtn(_liveMode ? '⏸️ إيقاف المراقبة' : '📡 مراقبة حيّة', _liveMode ? _amber : _purple, _toggleLive),
+            if (_opsTelegram)
+              _actionBtn('🔔 اختبر التنبيه', _cyan, _alertBusy
+                  ? null
+                  : () async {
+                      setState(() => _alertBusy = true);
+                      try {
+                        final m = await _sendAlert('', test: true);
+                        _snack(m);
+                      } catch (e) {
+                        _snack('فشل: ${_short2(e)}');
+                      } finally {
+                        if (mounted) setState(() => _alertBusy = false);
+                      }
+                    }),
+          ]),
           const SizedBox(height: 10),
           Wrap(spacing: 10, runSpacing: 6, alignment: WrapAlignment.center, children: [
             _pill('🔴 ${sum['fail']} مشكلة', _red),
@@ -840,6 +915,16 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
       ),
     );
   }
+
+  Widget _actionBtn(String t, Color c, VoidCallback? onTap) => ElevatedButton(
+        onPressed: onTap,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: c.withAlpha(30), foregroundColor: c, elevation: 0,
+          side: BorderSide(color: c.withAlpha(120)),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        ),
+        child: Text(t, style: GoogleFonts.outfit(color: c, fontSize: 12, fontWeight: FontWeight.w600)),
+      );
 
   Widget _pill(String t, Color c) => Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
@@ -1118,5 +1203,119 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
   void _snack(String m) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m, style: GoogleFonts.outfit()), backgroundColor: _card));
+  }
+
+  // ══════════════════════════ Self-heal ops ══════════════════════════
+  Future<void> _loadOps() async {
+    try {
+      final r = await http.get(Uri.parse('$_kOrigin/api/ops-status')).timeout(const Duration(seconds: 10));
+      final d = jsonDecode(r.body) as Map<String, dynamic>;
+      if (mounted) {
+        setState(() {
+          _opsRender = d['render'] == true;
+          _opsTelegram = d['telegram'] == true;
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<String> _restartProxy() async {
+    final r = await http
+        .post(Uri.parse('$_kOrigin/api/render-restart'), headers: {'Content-Type': 'application/json'}, body: '{}')
+        .timeout(const Duration(seconds: 25));
+    final d = jsonDecode(r.body) as Map<String, dynamic>;
+    if (d['ok'] == true) {
+      await _log('render_restart', 'deploy ${d['deployId'] ?? ''}');
+      return 'اتبعت أمر إعادة النشر ✅. البروكسي هيرجع خلال ~1–2 دقيقة. افحص تاني بعدها.';
+    }
+    throw Exception(d['reason']?.toString() ?? 'مش متاح');
+  }
+
+  Future<String> _sendAlert(String text, {bool test = false}) async {
+    final r = await http
+        .post(Uri.parse('$_kOrigin/api/alert'),
+            headers: {'Content-Type': 'application/json'}, body: jsonEncode(test ? {'test': true} : {'text': text}))
+        .timeout(const Duration(seconds: 20));
+    final d = jsonDecode(r.body) as Map<String, dynamic>;
+    if (d['ok'] == true) return 'اتبعت رسالة تيليجرام ✅';
+    throw Exception(d['reason']?.toString() ?? 'التنبيه مش متاح');
+  }
+
+  void _maybeAlertOnRed() {
+    if (!_opsTelegram) return;
+    final fails = _checks.where((c) => c.status == RStatus.fail).toList();
+    if (fails.isEmpty) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _lastAutoAlertMs < 15 * 60 * 1000) return; // client debounce 15 min
+    _lastAutoAlertMs = now;
+    final lines = fails.take(8).map((c) => '🔴 ${c.title}: ${c.detail}').join('\n');
+    _sendAlert('⚠️ إصلاح النظام لقى ${fails.length} مشكلة:\n$lines').then((_) {}).catchError((_) {});
+  }
+
+  int _autoFixableCount() =>
+      _checks.where((c) => c.status == RStatus.fail && c.fixAction != null).map((c) => c.fixLabel).toSet().length;
+
+  Future<void> _autoHealAll() async {
+    // Collect distinct SAFE fixes from red checks (dedupe by label).
+    final planned = <String, Future<String> Function()>{};
+    for (final c in _checks.where((c) => c.status == RStatus.fail && c.fixAction != null && c.fixLabel != null)) {
+      planned[c.fixLabel!] ??= c.fixAction!;
+    }
+    // Safety: prefer the DIRECT proxy over the Worker if both are ever queued.
+    if (planned.containsKey('رجّع للبروكسي المباشر')) planned.remove('حوّل للـ Worker');
+    if (planned.isEmpty) {
+      _snack('مفيش أعطال ليها حل تلقائي دلوقتي.');
+      return;
+    }
+    final list = planned.keys.map((k) => '• $k').join('\n');
+    showDialog(
+      context: context,
+      builder: (_) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          backgroundColor: _card,
+          title: Text('صلّح كل الأحمر تلقائيًا', style: GoogleFonts.outfit(color: _text, fontWeight: FontWeight.bold)),
+          content: Text(
+            'هيتنفّذ الإصلاحات الآمنة دي بالترتيب:\n\n$list\n\nكلها قابلة للرجوع، ومش بتمس الكابتشا ولا اللوجين ولا التداول.',
+            style: GoogleFonts.outfit(color: _muted, height: 1.6),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: Text('إلغاء', style: GoogleFonts.outfit(color: _muted))),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: _green),
+              onPressed: () async {
+                Navigator.pop(context);
+                final results = <String>[];
+                for (final e in planned.entries) {
+                  try {
+                    final m = await e.value();
+                    results.add('✅ ${e.key}: $m');
+                  } catch (err) {
+                    results.add('❌ ${e.key}: ${_short2(err)}');
+                  }
+                }
+                await _log('auto_heal', results.join(' | '));
+                _snack('تم تنفيذ ${planned.length} إصلاح. بيعيد الفحص…');
+                await _runAll();
+              },
+              child: Text('نفّذ الكل', style: GoogleFonts.outfit(color: Colors.black, fontWeight: FontWeight.bold)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _toggleLive() {
+    setState(() => _liveMode = !_liveMode);
+    _liveTimer?.cancel();
+    if (_liveMode) {
+      _liveTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+        if (!_running) _runAll();
+      });
+      _snack('المراقبة الحيّة اشتغلت — فحص تلقائي كل 30 ثانية.');
+    } else {
+      _snack('المراقبة الحيّة وقفت.');
+    }
   }
 }
