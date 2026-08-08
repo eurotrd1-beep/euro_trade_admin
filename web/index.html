@@ -41,6 +41,31 @@
     For more details:
     * https://docs.flutter.dev/platform-integration/web/initialization
   -->
+  <!-- ── Permanently DISABLE the service worker (definitive blank-page fix) ──
+       The Flutter SW kept serving a stale/broken cached bundle → blank admin page,
+       needing a manual cache-clear on every deploy. An admin panel needs the
+       network anyway (Supabase), so we kill the SW entirely: unregister any that
+       exist, wipe their caches, and block future registration. Runs BEFORE
+       flutter_bootstrap so Flutter can never re-register one. No more blank page. -->
+  <script>
+    (function () {
+      try {
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.getRegistrations().then(function (rs) {
+            rs.forEach(function (r) { try { r.unregister(); } catch (e) {} });
+          }).catch(function () {});
+          navigator.serviceWorker.register = function () {
+            return Promise.reject(new Error('service worker disabled'));
+          };
+        }
+        if (window.caches && caches.keys) {
+          caches.keys().then(function (ks) {
+            ks.forEach(function (k) { try { caches.delete(k); } catch (e) {} });
+          }).catch(function () {});
+        }
+      } catch (e) {}
+    })();
+  </script>
   <script>
     // Inline no-op stub for passkeys_web (transitive via supabase_flutter). Its
     // registerWith() calls PasskeyAuthenticator.init() at startup and BLANKS the
