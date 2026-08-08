@@ -425,11 +425,14 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
           }
           break;
         case 's_tables':
-          final want = {'configs': 24, 'pairs': 183, 'otc_pairs': 1, 'users': 1, 'candles': 1};
+          // table → a column that surely exists on it. `candles` is keyed by
+          // `key` (cols: key/data/updated_at) and has NO `id` column, so probing
+          // `id` there throws and shows a false "خطأ". Probe each by a real column.
+          const probe = {'configs': 'id', 'pairs': 'id', 'otc_pairs': 'id', 'users': 'id', 'candles': 'key'};
           final miss = <String>[];
-          for (final t in want.keys) {
+          for (final t in probe.keys) {
             try {
-              final n = await _count(t);
+              final n = await _count(t, col: probe[t]!);
               if (n <= 0) miss.add('$t (0)');
             } catch (_) {
               miss.add('$t (خطأ)');
@@ -642,8 +645,8 @@ class _SystemRepairScreenState extends State<SystemRepairScreen> {
 
   // Version-safe count: fetch id-only rows (small tables) and count them. Throws
   // if the table doesn't exist (caught by the caller → treated as missing).
-  Future<int> _count(String table, {dynamic Function(dynamic)? filter}) async {
-    dynamic q = _sb.from(table).select('id');
+  Future<int> _count(String table, {String col = 'id', dynamic Function(dynamic)? filter}) async {
+    dynamic q = _sb.from(table).select(col);
     if (filter != null) q = filter(q);
     final r = await q.timeout(const Duration(seconds: 8));
     return (r as List).length;
