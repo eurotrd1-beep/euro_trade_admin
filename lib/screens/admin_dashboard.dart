@@ -58,16 +58,16 @@ class _AdminDashboardState extends State<AdminDashboard> {
   Timer? _dbSizeTimer;
 
   // ── Server settings (switch Render servers live) ─────────────────
-  final _tvServerCtrl = TextEditingController();
+  final _proxyServerCtrl = TextEditingController();
   final _otcServerCtrl = TextEditingController();
-  bool _tvSaving = false;
+  bool _proxySaving = false;
   bool _otcSaving = false;
-  bool _tvTesting = false;
+  bool _proxyTesting = false;
   bool _otcTesting = false;
   // Live status: null = unknown, true = up, false = down.
-  bool? _tvOnline;
-  int _tvPingMs = 0;
-  DateTime? _tvCheckedAt;
+  bool? _proxyOnline;
+  int _proxyPingMs = 0;
+  DateTime? _proxyCheckedAt;
   Timer? _serverStatusTimer;
 
   // Controllers for Global VIP
@@ -257,7 +257,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                     'chart_symbol': chartSym,
                     'category': selectedCategory,
                     'type': selectedCategory,
-                    'source': 'tv',       // manually-added → TradingView source
+                    'source': 'po',       // manually-added → Pocket Option source
                     'is_otc': false,
                     'enabled': true,
                     'order': DateTime.now().millisecondsSinceEpoch,
@@ -602,7 +602,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
       // Sync the unified trading pairs list. Pocket Option rows are identified by
       // source='po'; remove any stale one first so we never create duplicates.
-      // chart_symbol carries NO ':' so the TradingView scraper ignores it.
       await sb.from('pairs').delete().eq('chart_symbol', symbol).eq('source', 'po');
       if (enabled) {
         await sb.from('pairs').insert({
@@ -1170,7 +1169,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
     if (id == null) return;
     try {
       await Supabase.instance.client.from('pairs').delete().eq('id', id);
-      if ((pair['source'] as String? ?? 'tv') == 'po') {
+      if ((pair['source'] as String? ?? 'po') == 'po') {
         final cs = (pair['chart_symbol'] as String? ?? '').trim();
         if (cs.isNotEmpty) {
           await Supabase.instance.client
@@ -1457,7 +1456,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                       itemBuilder: (context, i) {
                         final pair = pairs[i];
                         final cat = _normCat(pair['category'] as String?);
-                        final source = pair['source'] as String? ?? 'tv';
+                        final source = pair['source'] as String? ?? 'po';
                         final isPo = source == 'po';
                         final isOtc = pair['is_otc'] == true;
                         final isEnabled = pair['enabled'] != false;
@@ -1476,7 +1475,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                               Row(
                                 children: [
                                   Text(
-                                    isPo ? '🎯' : '📺',
+                                    '🎯',
                                     style: const TextStyle(fontSize: 13),
                                   ),
                                   const SizedBox(width: 6),
@@ -1647,11 +1646,11 @@ class _AdminDashboardState extends State<AdminDashboard> {
       const Duration(minutes: 5),
       (_) => _fetchDbSize(),
     );
-    // Live server-status: ping TV /health now + every 30s.
-    _refreshTvStatus();
+    // Live server-status: ping proxy /health now + every 30s.
+    _refreshProxyStatus();
     _serverStatusTimer = Timer.periodic(
       const Duration(seconds: 30),
-      (_) => _refreshTvStatus(),
+      (_) => _refreshProxyStatus(),
     );
   }
 
@@ -1843,7 +1842,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
     _newUserSubscription?.cancel();
     _dbSizeTimer?.cancel();
     _serverStatusTimer?.cancel();
-    _tvServerCtrl.dispose();
+    _proxyServerCtrl.dispose();
     _otcServerCtrl.dispose();
     _newUserOverlay?.remove();
     _globalVipValueController.dispose();
@@ -5833,8 +5832,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
                     style: GoogleFonts.outfit(color: textSecondary, fontSize: 12)),
                 const SizedBox(height: 8),
                 Wrap(children: [
-                  _sysChoice('📺 TradingView فقط', displaySource == 'tv',
-                      () => _setConfig('display_source', 'tv')),
                   _sysChoice('🎯 Pocket Option فقط', displaySource == 'po',
                       () => _setConfig('display_source', 'po')),
                   _sysChoice('🌐 الكل', displaySource == 'all',
@@ -5892,7 +5889,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
       }
       return;
     }
-    setState(() => isOtc ? _otcSaving = true : _tvSaving = true);
+    setState(() => isOtc ? _otcSaving = true : _proxySaving = true);
     try {
       await Supabase.instance.client.from('configs').upsert({
         'id': configId,
@@ -5902,13 +5899,13 @@ class _AdminDashboardState extends State<AdminDashboard> {
         },
       });
       if (mounted) {
-        (isOtc ? _otcServerCtrl : _tvServerCtrl).clear();
+        (isOtc ? _otcServerCtrl : _proxyServerCtrl).clear();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
               isOtc
                   ? 'تم حفظ رابط سيرفر OTC ✅ (للمراقبة)'
-                  : 'تم حفظ رابط TradingView ✅ — كل الأجهزة هتتحول فورًا',
+                  : 'تم حفظ رابط السيرفر ✅ — كل الأجهزة هتتحول فورًا',
               style: GoogleFonts.outfit(),
             ),
             backgroundColor: callGreen,
@@ -5916,7 +5913,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
         );
       }
       // Refresh the TV live indicator against the new URL right away.
-      if (!isOtc) _refreshTvStatus();
+      if (!isOtc) _refreshProxyStatus();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -5925,7 +5922,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
       }
     } finally {
       if (mounted) {
-        setState(() => isOtc ? _otcSaving = false : _tvSaving = false);
+        setState(() => isOtc ? _otcSaving = false : _proxySaving = false);
       }
     }
   }
@@ -5958,18 +5955,18 @@ class _AdminDashboardState extends State<AdminDashboard> {
     }
   }
 
-  /// Refreshes the live TradingView status (pings the currently-saved URL).
-  Future<void> _refreshTvStatus() async {
-    final url = await _currentUrl('tv_server_url');
+  /// Refreshes the live proxy status (pings the currently-saved URL).
+  Future<void> _refreshProxyStatus() async {
+    final url = await _currentUrl('proxy_server_url');
     if (url.isEmpty) return;
     final sw = Stopwatch()..start();
     final ok = await _pingHealth(url);
     sw.stop();
     if (!mounted) return;
     setState(() {
-      _tvOnline = ok;
-      _tvPingMs = sw.elapsedMilliseconds;
-      _tvCheckedAt = DateTime.now();
+      _proxyOnline = ok;
+      _proxyPingMs = sw.elapsedMilliseconds;
+      _proxyCheckedAt = DateTime.now();
     });
   }
 
@@ -5990,7 +5987,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
       }
       return;
     }
-    setState(() => isOtc ? _otcTesting = true : _tvTesting = true);
+    setState(() => isOtc ? _otcTesting = true : _proxyTesting = true);
     final ok = await _pingHealth(url);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -6002,7 +5999,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
           backgroundColor: ok ? callGreen : putRed,
         ),
       );
-      setState(() => isOtc ? _otcTesting = false : _tvTesting = false);
+      setState(() => isOtc ? _otcTesting = false : _proxyTesting = false);
     }
   }
 
@@ -6012,13 +6009,13 @@ class _AdminDashboardState extends State<AdminDashboard> {
           Supabase.instance.client.from('configs').stream(primaryKey: ['id']),
       builder: (context, snap) {
         final rows = snap.data ?? [];
-        String tvUrl = '';
+        String proxyUrl = '';
         String otcUrl = '';
         DateTime? otcHeartbeat;
         for (final r in rows) {
           final d = r['data'];
-          if (r['id'] == 'tv_server_url' && d is Map) {
-            tvUrl = (d['url'] as String?)?.trim() ?? '';
+          if (r['id'] == 'proxy_server_url' && d is Map) {
+            proxyUrl = (d['url'] as String?)?.trim() ?? '';
           } else if (r['id'] == 'otc_server_url' && d is Map) {
             otcUrl = (d['url'] as String?)?.trim() ?? '';
           } else if (r['id'] == 'otc_status' && d is Map) {
@@ -6062,24 +6059,24 @@ class _AdminDashboardState extends State<AdminDashboard> {
               ),
               const SizedBox(height: 14),
               _serverConfigCard(
-                title: 'سيرفر TradingView',
+                title: 'سيرفر البيانات (Proxy)',
                 subtitle: 'التطبيق بيتصل بيه مباشرة (الشارت + الأسعار)',
                 icon: Icons.candlestick_chart_rounded,
-                currentUrl: tvUrl,
-                controller: _tvServerCtrl,
-                configId: 'tv_server_url',
-                saving: _tvSaving,
-                testing: _tvTesting,
+                currentUrl: proxyUrl,
+                controller: _proxyServerCtrl,
+                configId: 'proxy_server_url',
+                saving: _proxySaving,
+                testing: _proxyTesting,
                 statusWidget: _liveStatusChip(
-                  online: _tvOnline,
-                  label: _tvOnline == null
+                  online: _proxyOnline,
+                  label: _proxyOnline == null
                       ? 'جاري الفحص...'
-                      : _tvOnline == true
-                          ? 'متصل — استجابة ${_tvPingMs}ms'
+                      : _proxyOnline == true
+                          ? 'متصل — استجابة ${_proxyPingMs}ms'
                           : 'غير متاح',
-                  sinceLabel: _tvCheckedAt == null
+                  sinceLabel: _proxyCheckedAt == null
                       ? ''
-                      : 'آخر فحص ${_timeAgoAr(_tvCheckedAt)}',
+                      : 'آخر فحص ${_timeAgoAr(_proxyCheckedAt)}',
                 ),
               ),
               const SizedBox(height: 12),
